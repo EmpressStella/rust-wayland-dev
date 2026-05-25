@@ -530,10 +530,10 @@ mod tests {
 
     #[test]
     fn test_update_sidebar_toggle_path_replaces_repo() {
-        let original = r#"{
-  \"custom/sidebar_toggle\": {
-    \"on-click\": \"$HOME/rust-wayland-power/sidebar-toggle\"
-  }
+                let original = r#"{
+    "custom/sidebar_toggle": {
+        "on-click": "$HOME/rust-wayland-power/sidebar-toggle"
+    }
 }
 "#;
         let updated = update_sidebar_toggle_path(original).expect("no update");

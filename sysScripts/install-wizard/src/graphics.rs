@@ -324,7 +324,7 @@ pub fn ensure_nvidia_modules_in_initcpio(sys: &impl CmdExecutor) -> Result<bool,
     let config_path = Path::new("/etc/mkinitcpio.conf");
     let content = sys.read_file_to_string(config_path)?;
 
-    let new_content = content
+    let mut new_content = content
         .lines()
         .map(|line| {
             let trimmed = line.trim_start();
@@ -347,6 +347,9 @@ pub fn ensure_nvidia_modules_in_initcpio(sys: &impl CmdExecutor) -> Result<bool,
         })
         .collect::<Vec<String>>()
         .join("\n");
+    if content.ends_with('\n') && !new_content.ends_with('\n') {
+        new_content.push('\n');
+    }
     let modified = sys.install_string_to_root_file(config_path, &new_content, "644")?;
     Ok(modified)
 }
