@@ -472,4 +472,108 @@ mod tests {
         let result = find_igpu(&env);
         assert_eq!(result, None);
     }
+
+    #[test]
+    fn test_find_igpu_ignores_non_card_entries() {
+        let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
+            "/sys/class/drm/card0-DP-1/device/vendor".to_string(),
+            "0x8086".to_string(),
+        );
+        env.mock_files.borrow_mut().insert(
+            "/sys/class/drm/card1/device/vendor".to_string(),
+            "0x1002".to_string(),
+        );
+        let result = find_igpu(&env);
+        assert_eq!(
+            result,
+            Some(("/dev/dri/card1".to_string(), "amd".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_create_sway_hybrid_script_intel() {
+        let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
+            "/sys/class/drm/card0/device/vendor".to_string(),
+            "0x8086".to_string(),
+        );
+        let modified = create_sway_hybrid_script(&env).expect("script creation failed");
+        assert!(modified);
+
+        let binding = env.mock_files.borrow();
+        let content = binding
+            .get("/usr/local/bin/sway-hybrid")
+            .expect("script missing");
+        assert!(content.contains("WLR_DRM_DEVICES=/dev/dri/card0"));
+        assert!(content.contains("intel_icd.x86_64.json"));
+    }
+
+    #[test]
+    fn test_create_sway_hybrid_script_no_igpu() {
+        let env = MockEnv::default();
+        let modified = create_sway_hybrid_script(&env).expect("script creation failed");
+        assert!(modified);
+
+        let binding = env.mock_files.borrow();
+        let content = binding
+            .get("/usr/local/bin/sway-hybrid")
+            .expect("script missing");
+        assert!(content.contains("iGPU not detected"));
+        assert!(!content.contains("WLR_DRM_DEVICES"));
+    }
+
+    #[test]
+    fn test_ensure_nvidia_modules_in_initcpio_adds_missing() {
+        let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
+            "/etc/mkinitcpio.conf".to_string(),
+            "MODULES=(i915)\n".to_string(),
+        );
+        let modified = ensure_nvidia_modules_in_initcpio(&env).expect("initcpio update failed");
+        assert!(modified);
+        let binding = env.mock_files.borrow();
+        let updated = binding.get("/etc/mkinitcpio.conf").unwrap();
+        for module in ["nvidia", "nvidia_modeset", "nvidia_uvm", "nvidia_drm"] {
+            assert!(updated.contains(module));
+        }
+    }
+
+    #[test]
+    fn test_ensure_nvidia_modules_in_initcpio_noop() {
+        let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
+            "/etc/mkinitcpio.conf".to_string(),
+            "MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)\n".to_string(),
+        );
+        let modified = ensure_nvidia_modules_in_initcpio(&env).expect("initcpio update failed");
+        assert!(!modified);
+        assert!(env.cmd_log.borrow().is_empty());
+    }
+
+    #[test]
+    fn test_setup_turing_gpu_enables_multilib() {
+        let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
+            "/etc/pacman.conf".to_string(),
+            "[options]\nHoldPkg = pacman\n#[multilib]\n#Include = /etc/pacman.d/mirrorlist\n"
+                .to_string(),
+        );
+        let result = setup_turing_gpu(&env);
+        assert!(result.is_ok());
+        let binding = env.mock_files.borrow();
+        let updated = binding.get("/etc/pacman.conf").unwrap();
+        assert!(updated.contains("[multilib]"));
+        assert!(updated.contains("Include = /etc/pacman.d/mirrorlist"));
+
+        let log = env.cmd_log.borrow();
+        assert!(log.iter().any(|entry| {
+            entry.0 == "sudo"
+                && entry.1
+                    == vec!["pacman", "-Sy"]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+        }));
+    }
 }

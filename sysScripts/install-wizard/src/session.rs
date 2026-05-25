@@ -917,6 +917,24 @@ mod tests {
             "\nserver_names = ['cloudflare']\nlisten_addresses = ['127.0.0.1:53', '[::1]:53']\n"
         );
     }
+
+    #[test]
+    fn test_dns_config_missing_lines_appended() {
+        let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
+            "/etc/dnscrypt-proxy/dnscrypt-proxy.toml".to_string(),
+            "\n# dnscrypt-proxy config\n".to_string(),
+        );
+        let result = configure_dns(&env);
+        assert!(result.is_ok());
+
+        let binding = env.mock_files.borrow();
+        let updated_file = binding
+            .get("/etc/dnscrypt-proxy/dnscrypt-proxy.toml")
+            .unwrap();
+        assert!(updated_file.contains("server_names = ['cloudflare']"));
+        assert!(updated_file.contains("listen_addresses = ['127.0.0.1:53', '[::1]:53']"));
+    }
     #[test]
     fn test_enforce_session_order() {
         let env = MockEnv::default();
@@ -1152,5 +1170,62 @@ mod tests {
         let binding = env.mock_files.borrow();
         let updated = binding.get("/etc/tlp.conf").unwrap();
         assert_eq!(updated, "new config");
+    }
+
+    #[test]
+    fn test_enforce_session_order_missing_sessions_skips_greetd() {
+        let env = MockEnv::default();
+        let result = enforce_session_order(&env, false, std::path::Path::new("/repo-root"));
+        assert!(result.is_ok());
+
+        let log = env.cmd_log.borrow();
+        assert_eq!(log.len(), 1, "Expected only proxy script install");
+        assert!(
+            log[0].0 == "sudo"
+                && log[0].1.starts_with(&[
+                    "install".to_string(),
+                    "-m".to_string(),
+                    "755".to_string(),
+                    "-o".to_string(),
+                    "root".to_string(),
+                    "-g".to_string(),
+                    "root".to_string(),
+                    "/repo-root/scripts/session-launch.sh".to_string(),
+                    "/usr/local/bin/genoa-proxy".to_string()
+                ])
+        );
+    }
+
+    #[test]
+    fn test_enforce_session_order_non_nvidia_exec_lines() {
+        let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
+            "/usr/share/wayland-sessions/10-niri.desktop".to_string(),
+            "Name=Niri\nExec=/usr/bin/niri\n".to_string(),
+        );
+        env.mock_files.borrow_mut().insert(
+            "/usr/share/wayland-sessions/50-sway.desktop".to_string(),
+            "Name=Sway\nExec=/usr/bin/sway\n".to_string(),
+        );
+
+        let result = enforce_session_order(&env, false, std::path::Path::new("/repo-root"));
+        assert!(result.is_ok());
+
+        let binding = env.mock_files.borrow();
+        let niri_session = binding
+            .get("/etc/greetd/genoa-sessions/10-niri.desktop")
+            .unwrap();
+        let sway_session = binding
+            .get("/etc/greetd/genoa-sessions/20-sway.desktop")
+            .unwrap();
+
+        assert!(niri_session.contains("Name=1. Niri"));
+        assert!(niri_session.contains(
+            "Exec=/usr/local/bin/genoa-proxy /usr/share/wayland-sessions/10-niri.desktop"
+        ));
+        assert!(sway_session.contains("Name=2. Sway (Battery)"));
+        assert!(sway_session.contains(
+            "Exec=/usr/local/bin/genoa-proxy /usr/share/wayland-sessions/50-sway.desktop"
+        ));
     }
 }

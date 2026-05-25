@@ -1,12 +1,15 @@
 use crate::traits::CmdExecutor;
 use std::cell::RefCell;
+use std::collections::HashSet;
 
 #[allow(dead_code)]
 #[derive(Default)]
 pub struct MockEnv {
     pub env_vars: std::collections::HashMap<String, String>,
+    pub available_commands: HashSet<String>,
     pub cmd_log: RefCell<Vec<(String, Vec<String>)>>,
     pub mock_files: RefCell<std::collections::HashMap<String, String>>,
+    pub mock_dirs: RefCell<HashSet<String>>,
     pub symlink_paths: RefCell<std::collections::HashMap<String, String>>,
 }
 
@@ -25,6 +28,21 @@ impl CmdExecutor for MockEnv {
         ));
         Ok(())
     }
+    fn run_cmd_in_dir(
+        &self,
+        _dir: &std::path::Path,
+        cmd: &str,
+        args: &[&str],
+    ) -> Result<(), std::io::Error> {
+        self.cmd_log.borrow_mut().push((
+            cmd.to_string(),
+            args.iter().map(|s| s.to_string()).collect(),
+        ));
+        Ok(())
+    }
+    fn command_exists(&self, cmd: &str) -> bool {
+        self.available_commands.contains(cmd)
+    }
     fn read_file_to_string(&self, path: &std::path::Path) -> Result<String, std::io::Error> {
         let path_str = path.to_str().unwrap();
         if let Some(content) = self.mock_files.borrow().get(path_str) {
@@ -41,16 +59,99 @@ impl CmdExecutor for MockEnv {
     }
     fn path_exists(&self, path: &std::path::Path) -> bool {
         path.to_str()
-            .map(|s| self.mock_files.borrow().contains_key(s))
+            .map(|s| {
+                self.mock_files.borrow().contains_key(s) || self.mock_dirs.borrow().contains(s)
+            })
             .unwrap_or(false)
     }
+    fn path_is_dir(&self, path: &std::path::Path) -> bool {
+        let Some(path_str) = path.to_str() else {
+            return false;
+        };
+        if self.mock_dirs.borrow().contains(path_str) {
+            return true;
+        }
+        let prefix = format!("{}/", path_str.trim_end_matches('/'));
+        self.mock_files
+            .borrow()
+            .keys()
+            .any(|key| key.starts_with(&prefix))
+    }
     fn create_dir_all(&self, _path: &std::path::Path) -> Result<(), std::io::Error> {
+        if let Some(path_str) = _path.to_str() {
+            self.mock_dirs.borrow_mut().insert(path_str.to_string());
+        }
         Ok(())
     }
     fn write_string_to_file(&self, path: &str, content: &str) -> Result<(), std::io::Error> {
         self.mock_files
             .borrow_mut()
             .insert(path.to_string(), content.to_string());
+        Ok(())
+    }
+    fn remove_dir_all(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
+        let Some(path_str) = path.to_str() else {
+            return Ok(());
+        };
+        let prefix = format!("{}/", path_str.trim_end_matches('/'));
+        self.mock_files
+            .borrow_mut()
+            .retain(|key, _| !key.starts_with(&prefix));
+        self.mock_dirs
+            .borrow_mut()
+            .retain(|dir| !dir.starts_with(&prefix) && dir != path_str);
+        Ok(())
+    }
+    fn rename_path(
+        &self,
+        from: &std::path::Path,
+        to: &std::path::Path,
+    ) -> Result<(), std::io::Error> {
+        let Some(from_str) = from.to_str() else {
+            return Ok(());
+        };
+        let Some(to_str) = to.to_str() else {
+            return Ok(());
+        };
+        if let Some(content) = self.mock_files.borrow_mut().remove(from_str) {
+            self.mock_files
+                .borrow_mut()
+                .insert(to_str.to_string(), content);
+            return Ok(());
+        }
+        if self.mock_dirs.borrow().contains(from_str) {
+            self.mock_dirs.borrow_mut().remove(from_str);
+            self.mock_dirs.borrow_mut().insert(to_str.to_string());
+        }
+        let prefix = format!("{}/", from_str.trim_end_matches('/'));
+        let new_prefix = format!("{}/", to_str.trim_end_matches('/'));
+        let mut moves = Vec::new();
+        for key in self.mock_files.borrow().keys() {
+            if key.starts_with(&prefix) {
+                let suffix = &key[prefix.len()..];
+                moves.push((key.clone(), format!("{}{}", new_prefix, suffix)));
+            }
+        }
+        for (old_key, new_key) in moves {
+            if let Some(content) = self.mock_files.borrow_mut().remove(&old_key) {
+                self.mock_files.borrow_mut().insert(new_key, content);
+            }
+        }
+        let mut dir_moves = Vec::new();
+        {
+            let dirs = self.mock_dirs.borrow();
+            for dir in dirs.iter() {
+                if dir.starts_with(&prefix) {
+                    let suffix = &dir[prefix.len()..];
+                    dir_moves.push((dir.clone(), format!("{}{}", new_prefix, suffix)));
+                }
+            }
+        }
+        for (old_dir, new_dir) in dir_moves {
+            if self.mock_dirs.borrow_mut().remove(&old_dir) {
+                self.mock_dirs.borrow_mut().insert(new_dir);
+            }
+        }
         Ok(())
     }
     fn install_string_to_root_file(
@@ -85,6 +186,9 @@ impl CmdExecutor for MockEnv {
         Ok(true)
     }
     fn create_root_dir_all(&self, _path: &std::path::Path) -> Result<(), std::io::Error> {
+        if let Some(path_str) = _path.to_str() {
+            self.mock_dirs.borrow_mut().insert(path_str.to_string());
+        }
         Ok(())
     }
     fn list_dir_file_names(&self, path: &std::path::Path) -> Result<Vec<String>, std::io::Error> {
