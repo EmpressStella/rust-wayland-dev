@@ -38,23 +38,7 @@ impl CmdExecutor for LiveEnv {
         Ok(())
     }
     fn command_exists(&self, cmd: &str) -> bool {
-        if cmd.is_empty() {
-            return false;
-        }
-        let cmd_path = Path::new(cmd);
-        if cmd_path.is_absolute() || cmd.contains('/') {
-            return is_executable(cmd_path);
-        }
-        let Some(path_var) = std::env::var_os("PATH") else {
-            return false;
-        };
-        for dir in std::env::split_paths(&path_var) {
-            let candidate = dir.join(cmd);
-            if is_executable(&candidate) {
-                return true;
-            }
-        }
-        false
+        command_exists_in_path(cmd, std::env::var_os("PATH").as_deref())
     }
     fn read_file_to_string(&self, path: &std::path::Path) -> Result<String, std::io::Error> {
         std::fs::read_to_string(path)
@@ -142,40 +126,32 @@ fn is_executable(path: &Path) -> bool {
     metadata.is_file() && (metadata.permissions().mode() & 0o111 != 0)
 }
 
+fn command_exists_in_path(cmd: &str, path_var: Option<&std::ffi::OsStr>) -> bool {
+    if cmd.is_empty() {
+        return false;
+    }
+    let cmd_path = Path::new(cmd);
+    if cmd_path.is_absolute() || cmd.contains('/') {
+        return is_executable(cmd_path);
+    }
+    let Some(path_var) = path_var else {
+        return false;
+    };
+    for dir in std::env::split_paths(path_var) {
+        let candidate = dir.join(cmd);
+        if is_executable(&candidate) {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
-    use std::ffi::OsString;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
-    use std::sync::Mutex;
     use tempfile::TempDir;
-
-    static PATH_LOCK: Mutex<()> = Mutex::new(());
-
-    struct PathGuard {
-        old: Option<OsString>,
-    }
-
-    impl PathGuard {
-        fn set(path: &Path) -> Self {
-            let old = env::var_os("PATH");
-            env::set_var("PATH", path);
-            Self { old }
-        }
-    }
-
-    impl Drop for PathGuard {
-        fn drop(&mut self) {
-            if let Some(old) = self.old.take() {
-                env::set_var("PATH", old);
-            } else {
-                env::remove_var("PATH");
-            }
-        }
-    }
 
     fn make_executable(path: &Path) {
         let mut perms = fs::metadata(path).unwrap().permissions();
@@ -185,17 +161,20 @@ mod tests {
 
     #[test]
     fn test_command_exists_searches_path() {
-        let _lock = PATH_LOCK.lock().unwrap();
         let temp_dir = TempDir::new().unwrap();
         let cmd_path = temp_dir.path().join("fakecmd");
         fs::write(&cmd_path, "#!/bin/sh\n").unwrap();
         make_executable(&cmd_path);
 
-        let _guard = PathGuard::set(temp_dir.path());
-        let env = LiveEnv;
-
-        assert!(env.command_exists("fakecmd"));
-        assert!(!env.command_exists("missingcmd"));
+        let path_var = std::env::join_paths([temp_dir.path()]).unwrap();
+        assert!(command_exists_in_path(
+            "fakecmd",
+            Some(path_var.as_os_str())
+        ));
+        assert!(!command_exists_in_path(
+            "missingcmd",
+            Some(path_var.as_os_str())
+        ));
     }
 
     #[test]
@@ -205,10 +184,10 @@ mod tests {
         fs::write(&cmd_path, "noop").unwrap();
 
         let env = LiveEnv;
-        let cmd = PathBuf::from(&cmd_path);
-        assert!(!env.command_exists(cmd.to_str().unwrap()));
+        let cmd = cmd_path.to_str().unwrap();
+        assert!(!env.command_exists(cmd));
 
         make_executable(&cmd_path);
-        assert!(env.command_exists(cmd.to_str().unwrap()));
+        assert!(env.command_exists(cmd));
     }
 }
