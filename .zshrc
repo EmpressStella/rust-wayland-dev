@@ -104,7 +104,6 @@ alias grep='grep --color=auto'
 alias ls='ls --color=auto'
 alias ll='ls -lh'
 alias la='ls -lha'
-alias rosevpn='sudo gpclient --fix-openssl connect gp.rose-hulman.edu'
 
 # Safety nets
 alias cp='cp -i'
