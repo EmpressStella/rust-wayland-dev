@@ -3,18 +3,18 @@
 //! A secure wrapper for toggling system-level DNS-over-HTTPS settings.
 //!
 //! Architecture:
-//! 1. **User Mode:** When run by a normal user (e.g., clicking Waybar), it detects the current state 
+//! 1. **User Mode:** When run by a normal user (e.g., clicking Waybar), it detects the current state
 //!    and re-executes *itself* using `pkexec` to gain root privileges.
 //! 2. **Root Mode:** When executed with root privileges (via pkexec), it modifies `/etc/resolv.conf`
 //!    and manages the `systemd` service.
 //!
 //! This design avoids needing `sudo` in scripts or storing passwords.
 
+use anyhow::{Context, Result};
+use serde::Deserialize;
 use std::env;
 use std::fs;
 use std::process::Command;
-use anyhow::{Context, Result};
-use serde::Deserialize; 
 
 // --- Configuration ---
 // Deserialize the full config struct even if we don't use all fields in this binary,
@@ -28,10 +28,10 @@ struct Config {
     text_off: String,
     class_off: String,
     // Logic fields (Used by cf-toggle)
-    resolv_content_on: String,   // e.g. "nameserver 127.0.0.1"
-    resolv_content_off: String,  // e.g. "nameserver 1.1.1.1"
-    bar_process_name: String,    // "waybar"
-    bar_signal_num: i32,         // Signal offset
+    resolv_content_on: String,  // e.g. "nameserver 127.0.0.1"
+    resolv_content_off: String, // e.g. "nameserver 1.1.1.1"
+    bar_process_name: String,   // "waybar"
+    bar_signal_num: i32,        // Signal offset
     service_name: String,
 }
 
@@ -44,8 +44,12 @@ fn load_config() -> Result<GlobalConfig> {
     let config_path = dirs::home_dir()
         .context("Cannot find home dir")?
         .join(".config/rust-dotfiles/config.toml");
-    let config_str = fs::read_to_string(&config_path)
-        .with_context(|| format!("Failed to read config file from path: {}", config_path.display()))?;
+    let config_str = fs::read_to_string(&config_path).with_context(|| {
+        format!(
+            "Failed to read config file from path: {}",
+            config_path.display()
+        )
+    })?;
     let config: GlobalConfig = toml::from_str(&config_str)
         .context("Failed to parse config.toml. Check for syntax errors.")?;
     Ok(config)
@@ -67,13 +71,12 @@ fn run_as_user() -> Result<()> {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
-    
+
     let mode = if is_running { "--stop" } else { "--start" };
     let content_on = &config.resolv_content_on;
     let content_off = &config.resolv_content_off;
     // Self-Reference: Find where this binary lives so we can execute it as root
-    let self_exe = env::current_exe()
-        .context("Failed to get path to own executable")?;
+    let self_exe = env::current_exe().context("Failed to get path to own executable")?;
 
     // Privilege Escalation
     // We pass the config values as arguments to the root process so the root process
@@ -106,35 +109,23 @@ fn run_as_user() -> Result<()> {
 /// This function only runs when `pkexec` invokes this binary.
 /// It has permission to write to /etc/ and control systemd.
 fn run_as_root(mode: &str, service_name: &str, content_on: &str, content_off: &str) -> Result<()> {
+    // Force delete to ensure we never follow a broken symlink
+    let _ = fs::remove_file("/etc/resolv.conf");
+
     if mode == "--start" {
-        // Enable service
         Command::new("systemctl")
-            .arg("enable")
-            .arg("--now")
-            .arg(service_name)
-            .status()?
-            .success()
-            .then_some(())
-            .context("Failed to start systemctl service")?;
+            .args(["enable", "--now", service_name])
+            .status()
+            .context("Failed to start service")?;
 
-        // Overwrite DNS
-        fs::write("/etc/resolv.conf", content_on)
-            .context("Failed to write /etc/resolv.conf")?;
-
+        fs::write("/etc/resolv.conf", content_on).context("Failed to write /etc/resolv.conf")?;
     } else if mode == "--stop" {
-        // Disable Service
         Command::new("systemctl")
-            .arg("disable")
-            .arg("--now")
-            .arg(service_name)
-            .status()?
-            .success()
-            .then_some(())
-            .context("Failed to stop systemctl service")?;
-        
-        // Restore DNS
-        fs::write("/etc/resolv.conf", content_off)
-            .context("Failed to write /etc/resolv.conf")?;
+            .args(["disable", "--now", service_name])
+            .status()
+            .context("Failed to stop service")?;
+
+        fs::write("/etc/resolv.conf", content_off).context("Failed to write /etc/resolv.conf")?;
     }
     Ok(())
 }
