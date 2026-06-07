@@ -81,7 +81,9 @@ fn configure_dns(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     let mut found_names = Vec::new();
     let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
     for line in &mut lines {
-        let normalized = line.trim_start().trim_start_matches('#').trim_start();
+        // FIX: Only trim whitespace. Leave the '#' intact so we ignore commented examples.
+        let normalized = line.trim_start();
+
         if normalized.starts_with("server_names =") {
             found_names.push("server_names".to_string());
             if line == "server_names = ['cloudflare']" {

@@ -65,12 +65,11 @@ fn run_as_user() -> Result<()> {
         .cloudflare_toggle;
 
     // Check current service status to toggle it
-    let is_running = Command::new("systemctl")
-        .arg("is-active")
-        .arg(&config.service_name)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    // Check current service status to toggle it
+    let current_resolv = fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
+    let is_running = current_resolv.contains("127.0.0.1");
+
+    let mode = if is_running { "--stop" } else { "--start" };
 
     let mode = if is_running { "--stop" } else { "--start" };
     let content_on = &config.resolv_content_on;
@@ -115,17 +114,19 @@ fn run_as_root(mode: &str, service_name: &str, content_on: &str, content_off: &s
     if mode == "--start" {
         Command::new("systemctl")
             .args(["enable", "--now", service_name])
-            .status()
-            .context("Failed to start service")?;
+            .status()?;
 
-        fs::write("/etc/resolv.conf", content_on).context("Failed to write /etc/resolv.conf")?;
+        // Add format! to force the newline
+        fs::write("/etc/resolv.conf", format!("{}\n", content_on.trim()))
+            .context("Failed to write /etc/resolv.conf")?;
     } else if mode == "--stop" {
         Command::new("systemctl")
             .args(["disable", "--now", service_name])
-            .status()
-            .context("Failed to stop service")?;
+            .status()?;
 
-        fs::write("/etc/resolv.conf", content_off).context("Failed to write /etc/resolv.conf")?;
+        // Add format! to force the newline
+        fs::write("/etc/resolv.conf", format!("{}\n", content_off.trim()))
+            .context("Failed to write /etc/resolv.conf")?;
     }
     Ok(())
 }
