@@ -69,7 +69,7 @@ fn run_as_user() -> Result<()> {
     let current_resolv = fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
     let is_running = current_resolv.contains("127.0.0.1");
 
-    let mode = if is_running { "--stop" } else { "--start" };
+    let _mode = if is_running { "--stop" } else { "--start" };
 
     let mode = if is_running { "--stop" } else { "--start" };
     let content_on = &config.resolv_content_on;
