@@ -14,7 +14,7 @@
 	"format-icons": [
 		"󰈸"
 	],
-	"on-click": "ghostty -e btop",
+	"on-click": "gnome-system-monitor",
 },
 
 "backlight": {
@@ -134,7 +134,7 @@
 "cpu": {
 	"format": "{usage}% 󰍛",
 	"interval": 1,
-	"on-click": "ghostty -e btop",
+	"on-click": "gnome-system-monitor",
 },
 
 "disk": {
@@ -145,7 +145,7 @@
 	"format": "{percentage_used}% 󰋊",
 	//"tooltip": true,
 	"tooltip-format": "{used} used out of {total} on {path} ({percentage_used}%)",
-	"on-click": "ghostty -e btop",
+	"on-click": "gnome-system-monitor",
 },
 
 "hyprland/language": {
@@ -206,7 +206,7 @@
 	"format-alt-click": "click",
 	"tooltip": true,
 	"tooltip-format": "{used:0.1f}GB/{total:0.1f}G",
-	"on-click": "ghostty -e btop",
+	"on-click": "gnome-system-monitor",
 },
 
 "mpris": {
