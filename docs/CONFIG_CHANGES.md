@@ -4,6 +4,16 @@
 My updater will not update your configs, it will only update my rust tools in /sysScripts. Because of this, breaking changes will periodically occur in configs that users must manually fix. I believe this is the best choice for user customization and personalization. That said, I will start maintaining a list of breaking config changes at the top of this readme. This list is not exhaustive and users can always refer back to my configs on this repo for complete and up to date config examples.
 
 * **swww**: (the Niri wallpaper manager dependency) has renamed to awww. Users will need to change line 83 of their niri configs to `spawn-at-startup "awww-daemon" "--namespace" "niri"` to have the correct dependency start when logging into Niri. The package will already be installed and the wallpaper management tooling is already refactored via the updater.
+* **weather and startup config cleanup**: The weather refactor removed the old OpenWeatherMap and Google Geolocation setup from the installer. The affected `.config` changes from the last commit were:
+
+    ```text
+    .config/niri/config.kdl                    -> start gsd-datetime with systemd-run at login
+    .config/rust-dotfiles/config.toml.template -> remove the waybar_weather block and OWM placeholder
+    .config/sway/UserConfigs/Startup_Apps.conf -> start gsd-datetime with systemd-run at login
+    .config/waybar/Modules                     -> remove the fixed timezone from the calendar module
+    .config/waybar/ModulesCustom               -> launch waybar-weather with --unit f (or --unit c for celsius)
+    ```
+
 * **compositor args in .config/rust-dotfiles**: In the rust-dotfiles config, the keybind launcher script now relies on arguments for `compositor`. The sheet blocks should look like this:
 
 ```
