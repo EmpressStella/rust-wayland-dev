@@ -90,7 +90,6 @@
 	"interval": 1,
     //"format": "{:%I:%M %p}", // AM PM format
     "format": "{:%H:%M}", // 24H
-	"timezone": "America/Indiana/Indianapolis",
 	"tooltip-format": "{:%A, %B %d, %Y}",
 	"on-click": "ghostty --title=calendar-tui -e $HOME/.cargo/bin/cal-tui"
 },

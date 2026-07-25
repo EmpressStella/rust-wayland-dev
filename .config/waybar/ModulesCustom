@@ -6,7 +6,7 @@
 	"format-alt-click": "click",
 	"interval": 300,
 	"return-type": "json",
-	"exec": "$HOME/.cargo/bin/waybar-weather",
+	"exec": "$HOME/.cargo/bin/waybar-weather --unit f",
 	"tooltip": true,
 },
 

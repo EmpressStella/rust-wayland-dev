@@ -30,13 +30,6 @@ file = "~/.config/sway/keybinds_sway.txt"
 compositor = "sway"
 
 # -------------------------------
-# [waybar_weather]
-# Settings for our weather module
-# -------------------------------
-[waybar_weather]
-owm_api_key = "YOUR_SECRET_OWM_KEY_HERE"
-
-# -------------------------------
 # [wallpaper_manager]:
 # Settings for our wallpaper daemon/selector
 # -------------------------------

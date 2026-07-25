@@ -106,29 +106,26 @@ pub fn setup_secrets_and_geoclue(
         println!(
             "   🧙 We need to generate your central config.toml and configure Location Services."
         );
-        let weather_api = Text::new("Enter OpenWeatherMap API Key (get one by making a free account at https://home.openweathermap.org/users/sign_up):").prompt().unwrap_or("YOUR_SECRET_OWM_KEY_HERE".to_string());
         let finnhub_api = Text::new(
             "Enter Finnhub.io API Key (get one by making a free account at finnhub.io/register):",
         )
         .prompt()
         .unwrap_or("YOUR_FINNHUB_KEY_HERE".to_string());
-        let template = render_config_template(&weather_api, &finnhub_api);
+        let template = render_config_template(&finnhub_api);
         sys.write_string_to_file(config_path_str, &template)?;
         let _ = sys.run_cmd_ignore_err("chmod", &["600", config_path_str]);
         println!("  ✅ Config generated securely at {:?}", config_path);
     } else {
         let contents = sys.read_file_to_string(&config_path)?;
-        if contents.contains("YOUR_SECRET_OWM_KEY") || contents.contains("YOUR_FINNHUB_KEY") {
-            let weather_api = Text::new("Enter OpenWeatherMap API Key (get one by making a free account at https://home.openweathermap.org/users/sign_up):").prompt().unwrap_or("YOUR_SECRET_OWM_KEY_HERE".to_string());
+        if contents.contains("YOUR_FINNHUB_KEY") {
             let finnhub_api = Text::new("Enter Finnhub.io API Key (get one by making a free account at finnhub.io/register):").prompt().unwrap_or("YOUR_FINNHUB_KEY_HERE".to_string());
-            if let Some(updated) = update_config_placeholders(&contents, &weather_api, &finnhub_api)
+            if let Some(updated) = update_config_placeholders(&contents, &finnhub_api)
             {
                 sys.write_string_to_file(config_path_str, &updated)?;
                 let _ = sys.run_cmd_ignore_err("chmod", &["600", config_path_str]);
             }
         }
     }
-    configure_geoclue(sys)?;
     let wallpaper_path = home.join("Pictures/Wallpapers");
     if !sys.path_exists(&wallpaper_path) {
         println!(
@@ -140,80 +137,41 @@ pub fn setup_secrets_and_geoclue(
     Ok(())
 }
 
-fn configure_geoclue(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
-    println!("   🌍 Configuring Geoclue...");
-    let gc_path = "/etc/geoclue/geoclue.conf";
-    let google_geo_api = Text::new("Enter Google Geolocation API Key for Geoclue(get one at console.cloud.google.com/apis/library/geocoding-backend.googleapis.com):").prompt().unwrap_or_default();
-    if google_geo_api.is_empty() {
-        println!("   ⚠️  No API key entered. Skipping Geoclue configuration.");
-        return Ok(());
-    }
-
-    let content = sys.read_file_to_string(Path::new(gc_path))?;
-    let Some(updated) = update_geoclue_config(&content, &google_geo_api) else {
-        println!("   ⚠️  No changes needed for geoclue.conf. It may already be configured.");
-        return Ok(());
-    };
-    sys.install_string_to_root_file(Path::new(gc_path), &updated, "644")?;
-    Ok(())
-}
-
-fn render_config_template(weather_api: &str, finnhub_api: &str) -> String {
+fn render_config_template(finnhub_api: &str) -> String {
     include_str!("../../../.config/rust-dotfiles/config.toml.template")
-        .replace("YOUR_SECRET_OWM_KEY_HERE", weather_api)
         .replace("YOUR_FINNHUB_KEY_HERE", finnhub_api)
 }
 
 fn update_config_placeholders(
     contents: &str,
-    weather_api: &str,
     finnhub_api: &str,
 ) -> Option<String> {
     let mut modified = false;
+    let legacy_weather_block = "# -------------------------------\n# [waybar_weather]\n# Settings for our weather module\n# -------------------------------\n[waybar_weather]\nowm_api_key = \"YOUR_SECRET_OWM_KEY_HERE\"\n";
+    let mut contents = contents.to_string();
+    if contents.contains(legacy_weather_block) {
+        contents = contents.replace(legacy_weather_block, "");
+        modified = true;
+    }
+
     let mut lines: Vec<String> = contents.lines().map(|s| s.to_string()).collect();
     for line in &mut lines {
-        if line.contains("YOUR_SECRET_OWM_KEY") || line.contains("YOUR_FINNHUB_KEY") {
+        if line.contains("owm_api_key") || line.contains("YOUR_SECRET_OWM_KEY") {
+            *line = String::new();
+            modified = true;
+        } else if line.contains("YOUR_FINNHUB_KEY") {
             *line = line
-                .replace("YOUR_SECRET_OWM_KEY_HERE", weather_api)
                 .replace("YOUR_FINNHUB_KEY_HERE", finnhub_api);
             modified = true;
         }
     }
     if modified {
-        Some(lines.join("\n") + "\n")
-    } else {
-        None
-    }
-}
-
-fn update_geoclue_config(content: &str, api_key: &str) -> Option<String> {
-    let mut modified = false;
-    let new_url = format!(
-        "url=https://www.googleapis.com/geolocation/v1/geolocate?key={}",
-        api_key
-    );
-    let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
-    for line in &mut lines {
-        let normalized = line
-            .trim_start()
-            .trim_start_matches(['#', ';'])
-            .trim_start();
-        if normalized.starts_with("enable=") {
-            if normalized == "enable=true" {
-                continue;
-            }
-            *line = "enable=true".to_string();
-            modified = true;
-        } else if normalized.contains("googleapis.com") && normalized != new_url {
-            *line = new_url.clone();
-            modified = true;
-        } else if normalized.starts_with("method=") && !normalized.contains("gmaps") {
-            *line = "method=gmaps".to_string();
-            modified = true;
-        }
-    }
-    if modified {
-        Some(lines.join("\n") + "\n")
+        let updated = lines
+            .into_iter()
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        Some(updated + "\n")
     } else {
         None
     }
@@ -512,20 +470,29 @@ mod tests {
 
     #[test]
     fn test_update_config_placeholders_replaces_keys() {
-        let original = "owm = \"YOUR_SECRET_OWM_KEY_HERE\"\nfinnhub = \"YOUR_FINNHUB_KEY_HERE\"\n";
+        let original = "finnhub = \"YOUR_FINNHUB_KEY_HERE\"\n";
         let updated =
-            update_config_placeholders(original, "owm-key", "fin-key").expect("no update");
-        assert!(updated.contains("owm-key"));
+            update_config_placeholders(original, "fin-key").expect("no update");
         assert!(updated.contains("fin-key"));
     }
 
     #[test]
-    fn test_update_geoclue_config_updates_fields() {
-        let original = "enable=false\nmethod=wifi\nurl=https://www.googleapis.com/geolocation/v1/geolocate?key=OLD\n";
-        let updated = update_geoclue_config(original, "NEW_KEY").expect("no update");
-        assert!(updated.contains("enable=true"));
-        assert!(updated.contains("method=gmaps"));
-        assert!(updated.contains("key=NEW_KEY"));
+    fn test_update_config_placeholders_removes_legacy_weather_section() {
+        let original = r#"# -------------------------------
+# [waybar_weather]
+# Settings for our weather module
+# -------------------------------
+[waybar_weather]
+owm_api_key = "YOUR_SECRET_OWM_KEY_HERE"
+
+[waybar_finance]
+api_key = "YOUR_FINNHUB_KEY_HERE"
+"#;
+        let updated =
+            update_config_placeholders(original, "fin-key").expect("no update");
+        assert!(!updated.contains("waybar_weather"));
+        assert!(!updated.contains("YOUR_SECRET_OWM_KEY"));
+        assert!(updated.contains("fin-key"));
     }
 
     #[test]

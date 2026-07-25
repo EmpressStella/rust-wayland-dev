@@ -411,13 +411,10 @@ systemctl --user daemon-reload
 systemctl --user enable --now battery-daemon.service
 ```
 
-## 10. Secrets + Geoclue + Generated config.toml
+## 10. Secrets + Generated config.toml
 
 The installer asks for:
-- OpenWeatherMap API key
 - Finnhub API key
-- Google Geolocation API key (optional but recommended)
-- Preferred terminal (`ghostty`, `alacritty`, or `kitty`)
 
 Create secure config dir/file:
 
@@ -439,15 +436,6 @@ Or create `~/.config/rust-dotfiles/config.toml` yourself and set mode `600`:
 
 ```bash
 chmod 600 "$HOME/.config/rust-dotfiles/config.toml"
-```
-
-Geoclue key patch (same pattern as installer):
-
-```bash
-KEY="YOUR_GOOGLE_KEY"
-sudo sed -i 's/^.*enable=true/enable=true/' /etc/geoclue/geoclue.conf
-sudo sed -i "s|^.*googleapis.com.*|url=https://www.googleapis.com/geolocation/v1/geolocate?key=$KEY|" /etc/geoclue/geoclue.conf
-sudo systemctl restart geoclue.service
 ```
 
 LibreWolf defaults:
