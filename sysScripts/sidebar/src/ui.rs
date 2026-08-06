@@ -3,7 +3,7 @@
 //! This module builds the GTK layout, connects controls, and coordinates background
 //! polling so command I/O does not block the main loop.
 
-use chrono::{Datelike, Local};
+use chrono::{Datelike, Local, NaiveDate};
 use gtk4::prelude::*;
 use gtk4::{Align, Application, ApplicationWindow, Box, Orientation};
 use gtk4_layer_shell::{Edge, Layer, LayerShell};
@@ -21,6 +21,19 @@ use crate::sysinfo;
 struct SliderSnapshot {
     brightness: Option<f64>,
     volume: Option<f64>,
+}
+
+#[derive(Clone)]
+struct CalendarMonthSnapshot {
+    year: i32,
+    month: u32,
+    events: Vec<helpers::CalendarEvent>,
+}
+
+#[derive(Clone)]
+struct CalendarRequestState {
+    in_flight: Arc<AtomicBool>,
+    loaded_month: Rc<RefCell<Option<(i32, u32)>>>,
 }
 
 // Parse brightnessctl CSV output and return percentage in [0, 100].
@@ -314,9 +327,53 @@ pub fn build_ui(app: &Application) {
 
     // Calendar Logic: State Management
     let current_view_date = Rc::new(RefCell::new(Local::now().date_naive()));
+    let calendar_cache: Rc<RefCell<Option<CalendarMonthSnapshot>>> = Rc::new(RefCell::new(None));
+    let calendar_request_state = CalendarRequestState {
+        in_flight: Arc::new(AtomicBool::new(false)),
+        loaded_month: Rc::new(RefCell::new(None)),
+    };
+    let (calendar_tx, calendar_rx) = mpsc::channel::<CalendarMonthSnapshot>();
+    let request_calendar_month = {
+        let calendar_tx = calendar_tx.clone();
+        let calendar_request_state = calendar_request_state.clone();
+        Rc::new(move |date: NaiveDate| {
+            let month_key = (date.year(), date.month());
+            if *calendar_request_state.loaded_month.borrow() == Some(month_key) {
+                return;
+            }
+
+            if calendar_request_state
+                .in_flight
+                .swap(true, Ordering::AcqRel)
+            {
+                return;
+            }
+
+            let calendar_tx_bg = calendar_tx.clone();
+            let calendar_in_flight_bg = Arc::clone(&calendar_request_state.in_flight);
+            std::thread::spawn(move || {
+                let events = helpers::load_calendar_events_for_month(month_key.0, month_key.1);
+                if let Err(error) = calendar_tx_bg.send(CalendarMonthSnapshot {
+                    year: month_key.0,
+                    month: month_key.1,
+                    events,
+                }) {
+                    helpers::log_command_failure(
+                        "calendar_worker_send_failed",
+                        "sidebar",
+                        &[],
+                        &error.to_string(),
+                    );
+                }
+                calendar_in_flight_bg.store(false, Ordering::Release);
+            });
+        })
+    };
     let grid_container_weak = grid_container.clone();
     let label_month_weak = label_month.clone();
     let view_date_state = current_view_date.clone();
+    let calendar_cache_for_grid = calendar_cache.clone();
+    let request_calendar_month_for_grid = request_calendar_month.clone();
 
     // Grid Redraw Function
     let refresh_grid = move || {
@@ -327,7 +384,19 @@ pub fn build_ui(app: &Application) {
             grid_container_weak.remove(&child);
         }
         // Build new rows via helper
-        let new_grid = helpers::build_calendar_grid(date.year(), date.month());
+        let cache = calendar_cache_for_grid.borrow();
+        let empty_events: &[helpers::CalendarEvent] = &[];
+        let events = cache
+            .as_ref()
+            .filter(|snapshot| snapshot.year == date.year() && snapshot.month == date.month())
+            .map(|snapshot| snapshot.events.as_slice())
+            .unwrap_or(empty_events);
+
+        if events.is_empty() {
+            request_calendar_month_for_grid(date);
+        }
+
+        let new_grid = helpers::build_calendar_grid_from_events(date.year(), date.month(), events);
         grid_container_weak.append(&new_grid);
     };
 
@@ -379,7 +448,7 @@ pub fn build_ui(app: &Application) {
 
     main_stack.add_titled(&month_view_box, Some("month_view"), "Month");
 
-    // View B: Day View (real appointments from cal-tui storage)
+    // View B: Day View (real appointments from GNOME Calendar / Evolution Data Server)
     let day_view_box = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
     day_view_box.set_margin_top(20);
     day_view_box.set_margin_start(10);
@@ -409,6 +478,8 @@ pub fn build_ui(app: &Application) {
     let day_state = current_view_date.clone();
     let day_title_clone = day_title.clone();
     let agenda_list_clone = agenda_list.clone();
+    let calendar_cache_for_day = calendar_cache.clone();
+    let request_calendar_month_for_day = request_calendar_month.clone();
     let refresh_day_view: Rc<dyn Fn()> = Rc::new(move || {
         let date = *day_state.borrow();
         day_title_clone.set_label(&format!("Agenda: {}", date.format("%A, %d %b")));
@@ -417,7 +488,19 @@ pub fn build_ui(app: &Application) {
             agenda_list_clone.remove(&child);
         }
 
-        let appointments = helpers::get_day_appointments(date);
+        let cache = calendar_cache_for_day.borrow();
+        let empty_events: &[helpers::CalendarEvent] = &[];
+        let events = cache
+            .as_ref()
+            .filter(|snapshot| snapshot.year == date.year() && snapshot.month == date.month())
+            .map(|snapshot| snapshot.events.as_slice())
+            .unwrap_or(empty_events);
+
+        if events.is_empty() {
+            request_calendar_month_for_day(date);
+        }
+
+        let appointments = helpers::get_day_appointments_from_events(date, events);
         if appointments.is_empty() {
             let empty = gtk4::Label::builder()
                 .label("No appointments scheduled.")
@@ -429,37 +512,49 @@ pub fn build_ui(app: &Application) {
         }
 
         for appt in appointments.into_iter().take(8) {
-            let text = format!(
-                "{}  {} ({}m)",
-                appt.time, appt.summary, appt.duration_minutes
-            );
+            let text = if appt.all_day {
+                format!("All day  {}", appt.summary)
+            } else {
+                format!(
+                    "{}  {} ({}m)",
+                    appt.time, appt.summary, appt.duration_minutes
+                )
+            };
             let button = gtk4::Button::builder()
                 .label(&text)
                 .halign(gtk4::Align::Fill)
                 .css_classes(vec!["flat".to_string()])
-                .tooltip_text("Open in cal-tui")
+                .tooltip_text("Open in GNOME Calendar")
                 .build();
 
-            let date_copy = date;
+            let event_uid = appt.uid.clone();
             button.connect_clicked(move |_| {
-                let date_arg = format!(
-                    "{}-{}-{}",
-                    date_copy.year(),
-                    date_copy.month(),
-                    date_copy.day()
-                );
-                let id_arg = appt.id.to_string();
-                helpers::run_in_ghostty(
-                    "calendar-tui",
-                    "cal-tui",
-                    &["--date", date_arg.as_str(), "--select-id", id_arg.as_str()],
-                );
+                helpers::run_command("gnome-calendar", &["--uuid", event_uid.as_str()]);
             });
             agenda_list_clone.append(&button);
         }
     });
 
     refresh_day_view();
+
+    let calendar_cache_update = calendar_cache.clone();
+    let refresh_grid_update = refresh_grid.clone();
+    let refresh_day_update = refresh_day_view.clone();
+    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+        let mut latest_snapshot = None;
+        while let Ok(snapshot) = calendar_rx.try_recv() {
+            latest_snapshot = Some(snapshot);
+        }
+
+        if let Some(snapshot) = latest_snapshot {
+            *calendar_request_state.loaded_month.borrow_mut() =
+                Some((snapshot.year, snapshot.month));
+            *calendar_cache_update.borrow_mut() = Some(snapshot);
+            refresh_grid_update();
+            refresh_day_update();
+        }
+        glib::ControlFlow::Continue
+    });
 
     let day_prev_state = current_view_date.clone();
     let day_prev_refresh = refresh_day_view.clone();

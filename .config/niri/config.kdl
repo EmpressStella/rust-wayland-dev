@@ -32,19 +32,19 @@ input {
 
 // Output configuration (Translated from monitors.conf)
 output "eDP-1" {
-    position x=3440 y=0
+    position x=0 y=0
     scale 1.5
 }
 output "DP-2" { // Assuming DP-2 is your primary at 0,0
-    position x=0 y=0
+    position x=2560 y=0
     scale 1.0
 }
 output "DP-3" { // Adjust position relative to DP-2
-    position x=0 y=0 // Example, change if it's beside DP-2
+    position x=2560 y=0 // Example, change if it's beside DP-2
     scale 1.0
 }
 output "DP-4" { // Adjust position relative to others
-    position x=0 y=0 // Example
+    position x=2560 y=0 // Example
     scale 1.0
 }
 
