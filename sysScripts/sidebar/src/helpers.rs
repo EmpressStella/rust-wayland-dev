@@ -1,9 +1,9 @@
 //! Shared helper utilities for sidebar widgets and command execution.
 
-use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, Utc, Weekday};
+use chrono::{Datelike, Duration, Local, NaiveDate};
 use gtk4::prelude::*;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
@@ -13,112 +13,113 @@ use std::time::Duration as StdDuration;
 use wait_timeout::ChildExt;
 
 #[derive(Debug, Deserialize, Clone)]
-struct StorageData {
-    #[serde(default)]
-    appointments: HashMap<u32, CalendarAppointment>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-struct CalendarAppointment {
-    id: u32,
+pub struct CalendarEvent {
+    uid: String,
     summary: String,
-    start: DateTime<Utc>,
-    duration: Duration,
-    rule: Option<Recurrence>,
-    #[serde(default)]
-    exceptions: Vec<DateTime<Utc>>,
+    start_date: String,
+    end_date: String,
+    display_time: String,
+    duration_minutes: i64,
+    all_day: bool,
+    sort_key: i64,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-enum Recurrence {
-    Daily {
-        until: Option<DateTime<Utc>>,
-    },
-    Weekly {
-        days: Vec<Weekday>,
-        until: Option<DateTime<Utc>>,
-    },
-}
-
+#[derive(Debug, Clone)]
 pub struct DayAppointment {
-    pub id: u32,
+    pub uid: String,
     pub summary: String,
     pub time: String,
     pub duration_minutes: i64,
+    pub all_day: bool,
 }
 
-fn calendar_data_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".local/share/cal-tui/calendar_data.json"))
+const CALENDAR_QUERY_HELPER: &str = env!("SIDEBAR_CALENDAR_QUERY_HELPER");
+
+#[allow(dead_code)]
+pub fn load_calendar_events() -> Vec<CalendarEvent> {
+    let today = Local::now().date_naive();
+    load_calendar_events_for_month(today.year(), today.month())
 }
 
-fn load_calendar_data() -> Vec<CalendarAppointment> {
-    let Some(path) = calendar_data_path() else {
+pub fn load_calendar_events_for_month(year: i32, month: u32) -> Vec<CalendarEvent> {
+    let start = first_day_of_month(year, month);
+    let end = next_month_first_of(year, month);
+    query_calendar_events(start, end)
+}
+
+fn query_calendar_events(start_date: NaiveDate, end_date: NaiveDate) -> Vec<CalendarEvent> {
+    let start_arg = start_date.format("%Y-%m-%d").to_string();
+    let end_arg = end_date.format("%Y-%m-%d").to_string();
+
+    let Some(output) = run_output_with_retry_with_timeout(
+        CALENDAR_QUERY_HELPER,
+        &[&start_arg, &end_arg],
+        CALENDAR_QUERY_TIMEOUT_MS,
+    ) else {
         return Vec::new();
     };
 
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-
-    let Ok(storage) = serde_json::from_str::<StorageData>(&raw) else {
-        return Vec::new();
-    };
-
-    storage.appointments.into_values().collect()
+    serde_json::from_slice::<Vec<CalendarEvent>>(&output.stdout).unwrap_or_else(|e| {
+        log_command_failure(
+            "json_parse_failed",
+            CALENDAR_QUERY_HELPER,
+            &[&start_arg, &end_arg],
+            &format!("error={}", e),
+        );
+        Vec::new()
+    })
 }
 
-fn occurs_on(appointment: &CalendarAppointment, target_date: NaiveDate) -> bool {
-    let start_date = appointment.start.date_naive();
-    if start_date > target_date {
+fn occurs_on(event: &CalendarEvent, target_date: NaiveDate) -> bool {
+    let Ok(start) = NaiveDate::parse_from_str(&event.start_date, "%Y-%m-%d") else {
         return false;
-    }
-
-    if appointment
-        .exceptions
-        .iter()
-        .any(|ex| ex.date_naive() == target_date)
-    {
+    };
+    let Ok(end) = NaiveDate::parse_from_str(&event.end_date, "%Y-%m-%d") else {
         return false;
-    }
+    };
 
-    match &appointment.rule {
-        None => start_date == target_date,
-        Some(Recurrence::Daily { until }) => until
-            .map(|end| target_date <= end.date_naive())
-            .unwrap_or(true),
-        Some(Recurrence::Weekly { days, until }) => {
-            if !until
-                .map(|end| target_date <= end.date_naive())
-                .unwrap_or(true)
-            {
-                return false;
-            }
-            days.contains(&target_date.weekday())
-        }
+    if event.all_day {
+        start <= target_date && target_date < end
+    } else {
+        start <= target_date && target_date <= end
     }
 }
 
+#[allow(dead_code)]
 pub fn get_day_appointments(date: NaiveDate) -> Vec<DayAppointment> {
-    let mut matches: Vec<CalendarAppointment> = load_calendar_data()
-        .into_iter()
-        .filter(|appt| occurs_on(appt, date))
+    let events = query_calendar_events(date, date + Duration::days(1));
+    get_day_appointments_from_events(date, &events)
+}
+
+pub fn get_day_appointments_from_events(
+    date: NaiveDate,
+    events: &[CalendarEvent],
+) -> Vec<DayAppointment> {
+    let mut matches: Vec<CalendarEvent> = events
+        .iter()
+        .filter(|event| occurs_on(event, date))
+        .cloned()
         .collect();
 
-    matches.sort_by_key(|appt| appt.start);
+    matches.sort_by_key(|event| event.sort_key);
 
     matches
         .into_iter()
-        .map(|appt| DayAppointment {
-            id: appt.id,
-            summary: appt.summary,
-            time: appt.start.format("%H:%M").to_string(),
-            duration_minutes: appt.duration.num_minutes(),
+        .map(|event| DayAppointment {
+            uid: event.uid,
+            summary: event.summary,
+            time: event.display_time,
+            duration_minutes: event.duration_minutes,
+            all_day: event.all_day,
         })
         .collect()
 }
 
-fn get_month_days_with_appointments(year: i32, month: u32) -> HashSet<u32> {
+fn get_month_days_with_appointments_from_events(
+    year: i32,
+    month: u32,
+    events: &[CalendarEvent],
+) -> HashSet<u32> {
     let mut days = HashSet::new();
 
     let Some(first_day) = NaiveDate::from_ymd_opt(year, month, 1) else {
@@ -136,17 +137,38 @@ fn get_month_days_with_appointments(year: i32, month: u32) -> HashSet<u32> {
     };
 
     let days_in_month = next_first.signed_duration_since(first_day).num_days() as u32;
-    let all = load_calendar_data();
 
     for day_num in 1..=days_in_month {
         if let Some(date) = NaiveDate::from_ymd_opt(year, month, day_num)
-            && all.iter().any(|appt| occurs_on(appt, date))
+            && events.iter().any(|event| occurs_on(event, date))
         {
             days.insert(day_num);
         }
     }
 
     days
+}
+
+#[allow(dead_code)]
+fn get_month_days_with_appointments(year: i32, month: u32) -> HashSet<u32> {
+    let events = query_calendar_events(
+        first_day_of_month(year, month),
+        next_month_first_of(year, month),
+    );
+    get_month_days_with_appointments_from_events(year, month, &events)
+}
+
+fn first_day_of_month(year: i32, month: u32) -> NaiveDate {
+    NaiveDate::from_ymd_opt(year, month, 1).unwrap_or_else(|| Local::now().date_naive())
+}
+
+fn next_month_first_of(year: i32, month: u32) -> NaiveDate {
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    NaiveDate::from_ymd_opt(next_year, next_month, 1).unwrap_or_else(|| Local::now().date_naive())
 }
 
 // --- Button Factories ---
@@ -220,7 +242,20 @@ pub fn make_badged_button(
 
 /// Generates a Month View Grid for the given Year/Month.
 /// Handles the math for "Empty slots before the 1st" and "Total days in month".
+#[allow(dead_code)]
 pub fn build_calendar_grid(year: i32, month: u32) -> gtk4::Grid {
+    let events = query_calendar_events(
+        first_day_of_month(year, month),
+        next_month_first_of(year, month),
+    );
+    build_calendar_grid_from_events(year, month, &events)
+}
+
+pub fn build_calendar_grid_from_events(
+    year: i32,
+    month: u32,
+    events: &[CalendarEvent],
+) -> gtk4::Grid {
     let grid = gtk4::Grid::builder()
         .column_spacing(5)
         .row_spacing(5)
@@ -259,7 +294,7 @@ pub fn build_calendar_grid(year: i32, month: u32) -> gtk4::Grid {
         return grid;
     };
     let days_in_month = next_first.signed_duration_since(first_day).num_days();
-    let appointment_days = get_month_days_with_appointments(year, month);
+    let appointment_days = get_month_days_with_appointments_from_events(year, month, events);
 
     // 3. Render the Grid
     let mut col = start_offset as i32;
@@ -277,7 +312,7 @@ pub fn build_calendar_grid(year: i32, month: u32) -> gtk4::Grid {
             .css_classes(vec!["calendar-day-num".to_string()])
             .build();
 
-        // Appointment Indicator (Red dot) based on cal-tui data.
+        // Appointment Indicator (Red dot) based on GNOME Calendar data.
         let has_appointment = appointment_days.contains(&(day_num as u32));
 
         let dot_label = gtk4::Label::builder()
@@ -303,11 +338,10 @@ pub fn build_calendar_grid(year: i32, month: u32) -> gtk4::Grid {
             .valign(gtk4::Align::Fill)
             .build();
 
-        // Click Action: Launch Calendar TUI focused on this date
+        // Click Action: Open GNOME Calendar focused on this date.
         btn.connect_clicked(move |_| {
-            println!("Clicked Date: {}/{}/{}", year, month, day_num);
             let date_arg = format!("{}-{}-{}", year, month, day_num);
-            run_in_ghostty("calendar-tui", "cal-tui", &["--date", date_arg.as_str()]);
+            run_command("gnome-calendar", &["--date", date_arg.as_str()]);
         });
 
         grid.attach(&btn, col, row, 1, 1);
@@ -379,6 +413,7 @@ fn resolve_program(program: &str) -> String {
 
 // Shared command policy for external tools invoked by the sidebar.
 const CMD_TIMEOUT_MS: u64 = 5000;
+const CALENDAR_QUERY_TIMEOUT_MS: u64 = 60000;
 const CMD_RETRIES: usize = 2;
 const RETRY_BACKOFF_MS: u64 = 120;
 
@@ -389,7 +424,7 @@ fn telemetry_path() -> PathBuf {
     PathBuf::from("/tmp/sidebar-telemetry.log")
 }
 
-fn log_command_failure(kind: &str, program: &str, args: &[&str], detail: &str) {
+pub fn log_command_failure(kind: &str, program: &str, args: &[&str], detail: &str) {
     let ts = Local::now().to_rfc3339();
     let arg_str = if args.is_empty() {
         "".to_string()
@@ -408,8 +443,12 @@ fn log_command_failure(kind: &str, program: &str, args: &[&str], detail: &str) {
     }
 }
 
-fn run_output_with_retry(program: &str, args: &[&str]) -> Option<std::process::Output> {
-    let timeout = StdDuration::from_millis(CMD_TIMEOUT_MS);
+fn run_output_with_retry_with_timeout(
+    program: &str,
+    args: &[&str],
+    timeout_ms: u64,
+) -> Option<std::process::Output> {
+    let timeout = StdDuration::from_millis(timeout_ms);
     let resolved_program = resolve_program(program);
 
     for attempt in 1..=(CMD_RETRIES + 1) {
@@ -470,7 +509,7 @@ fn run_output_with_retry(program: &str, args: &[&str]) -> Option<std::process::O
                     "timeout",
                     &resolved_program,
                     args,
-                    &format!("attempt={} timeout_ms={}", attempt, CMD_TIMEOUT_MS),
+                    &format!("attempt={} timeout_ms={}", attempt, timeout_ms),
                 );
             }
             Err(e) => {
@@ -491,6 +530,10 @@ fn run_output_with_retry(program: &str, args: &[&str]) -> Option<std::process::O
     }
 
     None
+}
+
+fn run_output_with_retry(program: &str, args: &[&str]) -> Option<std::process::Output> {
+    run_output_with_retry_with_timeout(program, args, CMD_TIMEOUT_MS)
 }
 
 pub fn run_command(program: &str, args: &[&str]) {
@@ -559,5 +602,46 @@ pub fn pkg_count() -> String {
             .count()
             .to_string(),
         _ => "N/A".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn calendar_event(start_date: &str, end_date: &str, all_day: bool) -> CalendarEvent {
+        CalendarEvent {
+            uid: "uid-1".to_string(),
+            summary: "Test".to_string(),
+            start_date: start_date.to_string(),
+            end_date: end_date.to_string(),
+            display_time: "09:00".to_string(),
+            duration_minutes: 30,
+            all_day,
+            sort_key: 0,
+        }
+    }
+
+    #[test]
+    fn timed_event_matches_same_day() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 5).unwrap();
+        assert!(occurs_on(
+            &calendar_event("2026-08-05", "2026-08-05", false),
+            date
+        ));
+    }
+
+    #[test]
+    fn all_day_event_keeps_exclusive_end() {
+        let start_date = NaiveDate::from_ymd_opt(2026, 8, 5).unwrap();
+        let end_date = NaiveDate::from_ymd_opt(2026, 8, 6).unwrap();
+        assert!(occurs_on(
+            &calendar_event("2026-08-05", "2026-08-06", true),
+            start_date
+        ));
+        assert!(!occurs_on(
+            &calendar_event("2026-08-05", "2026-08-06", true),
+            end_date
+        ));
     }
 }

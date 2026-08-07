@@ -6,6 +6,9 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+const GEOCLUE_CONF_PATH: &str = "/etc/geoclue/geoclue.conf";
+const BEACONDB_GEOLOCATE_URL: &str = "https://api.beacondb.net/v1/geolocate";
+
 pub fn setup_librewolf(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::io::Error> {
     println!("   🐺 Configuring LibreWolf for Human Beings...");
 
@@ -119,13 +122,15 @@ pub fn setup_secrets_and_geoclue(
         let contents = sys.read_file_to_string(&config_path)?;
         if contents.contains("YOUR_FINNHUB_KEY") {
             let finnhub_api = Text::new("Enter Finnhub.io API Key (get one by making a free account at finnhub.io/register):").prompt().unwrap_or("YOUR_FINNHUB_KEY_HERE".to_string());
-            if let Some(updated) = update_config_placeholders(&contents, &finnhub_api)
-            {
+            if let Some(updated) = update_config_placeholders(&contents, &finnhub_api) {
                 sys.write_string_to_file(config_path_str, &updated)?;
                 let _ = sys.run_cmd_ignore_err("chmod", &["600", config_path_str]);
             }
         }
     }
+
+    configure_geoclue_for_beacondb(sys)?;
+
     let wallpaper_path = home.join("Pictures/Wallpapers");
     if !sys.path_exists(&wallpaper_path) {
         println!(
@@ -142,10 +147,7 @@ fn render_config_template(finnhub_api: &str) -> String {
         .replace("YOUR_FINNHUB_KEY_HERE", finnhub_api)
 }
 
-fn update_config_placeholders(
-    contents: &str,
-    finnhub_api: &str,
-) -> Option<String> {
+fn update_config_placeholders(contents: &str, finnhub_api: &str) -> Option<String> {
     let mut modified = false;
     let legacy_weather_block = "# -------------------------------\n# [waybar_weather]\n# Settings for our weather module\n# -------------------------------\n[waybar_weather]\nowm_api_key = \"YOUR_SECRET_OWM_KEY_HERE\"\n";
     let mut contents = contents.to_string();
@@ -160,8 +162,7 @@ fn update_config_placeholders(
             *line = String::new();
             modified = true;
         } else if line.contains("YOUR_FINNHUB_KEY") {
-            *line = line
-                .replace("YOUR_FINNHUB_KEY_HERE", finnhub_api);
+            *line = line.replace("YOUR_FINNHUB_KEY_HERE", finnhub_api);
             modified = true;
         }
     }
@@ -175,6 +176,179 @@ fn update_config_placeholders(
     } else {
         None
     }
+}
+
+fn configure_geoclue_for_beacondb(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
+    println!("   🌍 Configuring Geoclue for BeaconDB...");
+
+    let gc_path = Path::new(GEOCLUE_CONF_PATH);
+    let content = match sys.read_file_to_string(gc_path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err),
+    };
+
+    let Some(updated) = update_geoclue_config(&content) else {
+        println!("   ℹ️  Geoclue already has a functional Wi-Fi geolocation config.");
+        return Ok(());
+    };
+
+    sys.install_string_to_root_file(gc_path, &updated, "644")?;
+    println!("   ✅ BeaconDB Geoclue configuration applied.");
+    Ok(())
+}
+
+fn update_geoclue_config(contents: &str) -> Option<String> {
+    let mut lines: Vec<String> = contents.lines().map(|line| line.to_string()).collect();
+    let mut wifi_section_start = None;
+    let mut wifi_section_end = lines.len();
+
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if trimmed.eq_ignore_ascii_case("[wifi]") {
+                wifi_section_start = Some(index);
+                continue;
+            }
+
+            if wifi_section_start.is_some() {
+                wifi_section_end = index;
+                break;
+            }
+        }
+    }
+
+    let Some(start_index) = wifi_section_start else {
+        lines.push("[wifi]".to_string());
+        lines.push("enable = true".to_string());
+        lines.push(format!("url = {}", BEACONDB_GEOLOCATE_URL));
+        return Some(lines.join("\n") + "\n");
+    };
+
+    let mut enable_line_index = None;
+    let mut url_line_index = None;
+    let mut enable_value = None;
+    let mut url_value = None;
+    let mut commented_google_url_line_index = None;
+
+    for (index, line) in lines
+        .iter()
+        .enumerate()
+        .take(wifi_section_end)
+        .skip(start_index + 1)
+    {
+        let trimmed = line.trim_start();
+
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.starts_with('#') || trimmed.starts_with(';') {
+            if let Some((comment_key, comment_value)) = parse_commented_assignment(trimmed)
+                && comment_key.eq_ignore_ascii_case("url")
+                && is_google_url(&comment_value)
+                && !is_placeholder_google_url(&comment_value)
+            {
+                commented_google_url_line_index = Some(index);
+            }
+            continue;
+        }
+
+        if let Some((key, value)) = trimmed.split_once('=') {
+            let key = key.trim();
+            let value = value.trim().trim_matches('"');
+
+            if key.eq_ignore_ascii_case("enable") {
+                enable_line_index = Some(index);
+                enable_value = Some(value.eq_ignore_ascii_case("true"));
+            } else if key.eq_ignore_ascii_case("url") {
+                url_line_index = Some(index);
+                url_value = Some(value.to_string());
+            }
+        }
+    }
+
+    // If there is an active (uncommented) valid personal Google API key:
+    if let Some(ref val) = url_value
+        && is_google_url(val)
+        && !is_placeholder_google_url(val)
+    {
+        // If wifi is explicitly disabled, leave their key and leave wifi disabled.
+        if matches!(enable_value, Some(false)) {
+            return None;
+        }
+        // If it's active and enabled, leave it alone.
+        return None;
+    }
+
+    if let Some(index) = commented_google_url_line_index {
+        lines[index] = format!("url = {}", BEACONDB_GEOLOCATE_URL);
+        upsert_enable_true(&mut lines, start_index, wifi_section_end, enable_line_index);
+        return Some(lines.join("\n") + "\n");
+    }
+
+    // Otherwise (commented out URL, placeholder URL, or missing URL), apply BeaconDB and enable wifi.
+    let enable_line = "enable = true".to_string();
+    let url_line = format!("url = {}", BEACONDB_GEOLOCATE_URL);
+
+    match (enable_line_index, url_line_index) {
+        (Some(enable_index), Some(url_index)) => {
+            lines[enable_index] = enable_line;
+            lines[url_index] = url_line;
+        }
+        (Some(enable_index), None) => {
+            lines[enable_index] = enable_line;
+            lines.insert(enable_index + 1, url_line);
+        }
+        (None, Some(url_index)) => {
+            lines[url_index] = url_line;
+            lines.insert(start_index + 1, enable_line);
+        }
+        (None, None) => {
+            lines.insert(start_index + 1, enable_line);
+            lines.insert(start_index + 2, url_line);
+        }
+    }
+
+    Some(lines.join("\n") + "\n")
+}
+
+fn is_google_url(value: &str) -> bool {
+    let value = value.trim();
+    value.contains("googleapis.com") || value.contains("geolocation/v1/geolocate")
+}
+
+fn is_placeholder_google_url(value: &str) -> bool {
+    let value = value.trim();
+    is_google_url(value) && value.contains("YOUR_KEY")
+}
+
+fn parse_commented_assignment(line: &str) -> Option<(String, String)> {
+    let trimmed = line.trim_start();
+    let body = trimmed
+        .strip_prefix('#')
+        .or_else(|| trimmed.strip_prefix(';'))?
+        .trim_start();
+    let (key, value) = body.split_once('=')?;
+    Some((
+        key.trim().to_string(),
+        value.trim().trim_matches('"').to_string(),
+    ))
+}
+
+fn upsert_enable_true(
+    lines: &mut Vec<String>,
+    wifi_section_start: usize,
+    wifi_section_end: usize,
+    enable_line_index: Option<usize>,
+) {
+    if let Some(index) = enable_line_index {
+        lines[index] = "enable = true".to_string();
+        return;
+    }
+
+    let insert_index = wifi_section_end.max(wifi_section_start + 1);
+    lines.insert(insert_index, "enable = true".to_string());
 }
 
 /// Builds custom Rust apps using native caching.
@@ -471,8 +645,7 @@ mod tests {
     #[test]
     fn test_update_config_placeholders_replaces_keys() {
         let original = "finnhub = \"YOUR_FINNHUB_KEY_HERE\"\n";
-        let updated =
-            update_config_placeholders(original, "fin-key").expect("no update");
+        let updated = update_config_placeholders(original, "fin-key").expect("no update");
         assert!(updated.contains("fin-key"));
     }
 
@@ -488,11 +661,80 @@ owm_api_key = "YOUR_SECRET_OWM_KEY_HERE"
 [waybar_finance]
 api_key = "YOUR_FINNHUB_KEY_HERE"
 "#;
-        let updated =
-            update_config_placeholders(original, "fin-key").expect("no update");
+        let updated = update_config_placeholders(original, "fin-key").expect("no update");
         assert!(!updated.contains("waybar_weather"));
         assert!(!updated.contains("YOUR_SECRET_OWM_KEY"));
         assert!(updated.contains("fin-key"));
+    }
+
+    #[test]
+    fn test_update_geoclue_config_keeps_functional_existing_url() {
+        let original = r#"[wifi]
+enable = true
+url = "https://maps.googleapis.com/maps/api/geolocation/v1/geolocate?key=personal"
+"#;
+
+        assert!(update_geoclue_config(original).is_none());
+    }
+
+    #[test]
+    fn test_update_geoclue_config_preserves_google_when_wifi_disabled() {
+        let original = r#"[wifi]
+enable = false
+url = "https://maps.googleapis.com/maps/api/geolocation/v1/geolocate?key=personal"
+"#;
+
+        assert!(update_geoclue_config(original).is_none());
+    }
+
+    #[test]
+    fn test_update_geoclue_config_replaces_commented_google_url() {
+        let original = r#"[wifi]
+enable = false
+# url = "https://maps.googleapis.com/maps/api/geolocation/v1/geolocate?key=personal"
+"#;
+
+        let updated = update_geoclue_config(original).expect("expected update");
+        assert!(updated.contains(BEACONDB_GEOLOCATE_URL));
+        assert!(updated.contains("enable = true"));
+        assert!(!updated.contains("maps.googleapis.com"));
+    }
+
+    #[test]
+    fn test_update_geoclue_config_replaces_dead_mozilla_url() {
+        let original = r#"[wifi]
+enable = false
+url = https://location.services.mozilla.com/v1/geolocate
+"#;
+
+        let updated = update_geoclue_config(original).expect("expected update");
+        assert!(updated.contains(BEACONDB_GEOLOCATE_URL));
+        assert!(updated.contains("enable = true"));
+        assert_eq!(
+            updated
+                .lines()
+                .filter(|line| line.trim_start().starts_with("url"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_update_geoclue_config_replaces_google_placeholder_template() {
+        let original = r#"[wifi]
+# url=https://www.googleapis.com/geolocation/v1/geolocate?key=YOUR_KEY
+"#;
+
+        let updated = update_geoclue_config(original).expect("expected update");
+        assert!(updated.contains(BEACONDB_GEOLOCATE_URL));
+        assert!(updated.contains("enable = true"));
+        assert_eq!(
+            updated
+                .lines()
+                .filter(|line| line.trim_start().starts_with("url"))
+                .count(),
+            1
+        );
     }
 
     #[test]

@@ -19,10 +19,10 @@ include $UserConfigs/WindowRules.conf
 
 ### Output configuration ###
 # Your monitor setup translated from monitors.conf
-output eDP-1 mode 3840x2160 position 3440 0 scale 2
-output DP-2 position 0 0 scale 1
-output DP-3 position 0 0 scale 1
-output DP-4 position 0 0 scale 1 
+output eDP-1 mode 3840x2160 position 0 0 scale 2
+output DP-2 position 2560 0 scale 1
+output DP-3 position 2560 0 scale 1
+output DP-4 position 2560 0 scale 1 
 
 ### User Settings (Translated from UserSettings.conf) ###
 # Gaps

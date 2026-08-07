@@ -390,6 +390,9 @@ fn main() {
             eprintln!("   ⚠️ Failed to write repository root to config: {}", e);
         }
         patch_waybar_sidebar_toggle_path(&live_sys, &home);
+        if let Err(e) = setup_secrets_and_geoclue(&live_sys, &home) {
+            eprintln!("   ⚠️ Failed to set up secrets and geoclue: {}", e);
+        }
 
         print_logo();
         println!(
