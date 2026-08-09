@@ -61,30 +61,9 @@ After this, you will need to install the iso to a bootable USB drive and install
 
 Once you have a basic Arch install with an internet connection, you can run the installer. It will handle all the package installation and configuration for you.
 
-The installer will ask for these API keys. It is much easier to generate them before you start.
+The installer will ask for this API key. It is much easier to generate it before you start.
 
-1. **Weather (OpenWeatherMap):** [Sign Up Free](https://home.openweathermap.org/users/sign_up)
-2. **Stocks (Finnhub):** [Sign Up Free](https://finnhub.io/register)
-3. **Geolocation (Google Cloud):** _Required for automatic location detection._
-
-<details>
-<summary><strong>🌍 Click here for Google Geolocation Instructions (Required)</strong></summary>
-
-The weather module uses Geoclue, which requires the **Google Maps Geolocation API** to find your laptop (since most laptops lack GPS).
-
-**You must enable Billing for this API.**
-_Don't panic: Google gives $200/month free credit. This is many times more than my weather app will ever use, but a card is required. You will not be charged_
-
-1. Go to [Google Cloud Console](https://console.cloud.google.com).
-2. **Create a Project:** Name it "Arch-Weather".
-3. **Enable the API:** Search for **"Geolocation API"** (Not Geocoding) and click **Enable**.
-4. **Create Credentials:** Go to **APIs & Services > Credentials** → **Create Credentials** → **API Key**.
-5. **Enable Billing:** Go to **Billing** in the sidebar and link a card.
-6. **Copy the Key:** Paste this into the installer when prompted.
-
-Note: **When setting up Google Billing, you may see a temporary authorization hold ($1-$10) to verify your card. This is not a charge and will disappear in a few days. If you cannot provide a card, you can manually edit /etc/geoclue/geoclue.conf to use [ip] location instead of [wifi].**
-
-</details>
+**Stocks (Finnhub):** [Sign Up Free](https://finnhub.io/register)
 
 ### 2. Run the Installer
 
@@ -136,6 +115,7 @@ This system is designed to keep the core tooling fresh without overwriting your 
 
 - **[Manual Installation Guide](docs/MANUAL_INSTALL.md):** Prefer to run commands yourself? Read this.
 - **[Power Management (NVIDIA)](docs/POWER_MANAGEMENT.md):** How I achieved sub-5W idle on a gaming laptop.
+- **[Sidebar Guide](docs/SIDEBAR.md):** Controls, calendar behavior, dependencies, and manual build instructions.
 
 ---
 
@@ -179,13 +159,13 @@ All the helper scripts in this repo have been rewritten in Rust for maximum perf
 
 - **`updater`**: The `on-click` script for the `update-check` module. It simply launches your terminal (`ghostty`) to run the actual system update.
 
-- **`sidebar`**: Sidebar control interface. Includes a calender, finance tooltip that launches TUI on click, launchers to rust binaries, and system controls like brightness and volume.
+- **`sidebar`**: GTK4 control interface with calendar month/day views, a finance launcher, media controls, quick system actions, brightness, and volume.
 
 <p align="center">
   <img src="screenshots/sidebar.png" width="60%" alt="Power Menu formatting"/>
   </p>
 
-- **`cal-tui`**: A calendar app that runs in your terminal. It allows you to add appointments to your calender.
+- **`cal-tui`**: A calendar app that runs in your terminal. It allows you to add appointments to your calendar.
 
 <p align="center">
   <img src="screenshots/CalTuiDay.png" width="45%" alt="Calendar TUI"/>

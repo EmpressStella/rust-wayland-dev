@@ -14,7 +14,7 @@
 	"format-icons": [
 		"󰈸"
 	],
-	"on-click": "ghostty -e btop",
+	"on-click": "gnome-system-monitor",
 },
 
 "backlight": {
@@ -90,7 +90,6 @@
 	"interval": 1,
     //"format": "{:%I:%M %p}", // AM PM format
     "format": "{:%H:%M}", // 24H
-	"timezone": "America/Indiana/Indianapolis",
 	"tooltip-format": "{:%A, %B %d, %Y}",
 	"on-click": "ghostty --title=calendar-tui -e $HOME/.cargo/bin/cal-tui"
 },
@@ -134,7 +133,7 @@
 "cpu": {
 	"format": "{usage}% 󰍛",
 	"interval": 1,
-	"on-click": "ghostty -e btop",
+	"on-click": "gnome-system-monitor",
 },
 
 "disk": {
@@ -145,7 +144,7 @@
 	"format": "{percentage_used}% 󰋊",
 	//"tooltip": true,
 	"tooltip-format": "{used} used out of {total} on {path} ({percentage_used}%)",
-	"on-click": "ghostty -e btop",
+	"on-click": "gnome-system-monitor",
 },
 
 "hyprland/language": {
@@ -206,7 +205,7 @@
 	"format-alt-click": "click",
 	"tooltip": true,
 	"tooltip-format": "{used:0.1f}GB/{total:0.1f}G",
-	"on-click": "ghostty -e btop",
+	"on-click": "gnome-system-monitor",
 },
 
 "mpris": {

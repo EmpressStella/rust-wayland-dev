@@ -38,7 +38,8 @@ use crate::live_env::LiveEnv;
 use crate::session::{configure_system, configure_tlp, enforce_session_order};
 use crate::traits::CmdExecutor;
 use crate::update::{
-    get_ignored_packages, install_aur_packages, install_pacman_packages, optimize_pacman_config,
+    get_ignored_packages, install_aur_packages, install_clepsydre_package, install_pacman_packages,
+    optimize_pacman_config,
 };
 use crate::user::{
     build_custom_apps, finalize_setup, link_dotfiles_and_copy_resources,
@@ -396,6 +397,9 @@ fn main() {
             eprintln!("   ⚠️ Failed to write repository root to config: {}", e);
         }
         patch_waybar_sidebar_toggle_path(&live_sys, &home);
+        if let Err(e) = setup_secrets_and_geoclue(&live_sys, &home) {
+            eprintln!("   ⚠️ Failed to set up secrets and geoclue: {}", e);
+        }
 
         print_logo();
         println!(

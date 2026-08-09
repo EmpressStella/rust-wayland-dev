@@ -2,6 +2,11 @@ use crate::traits::CmdExecutor;
 use colored::*;
 use std::path::Path;
 
+const CLEPSYDRE_PACKAGE_NAME: &str = "clepsydre-git-r.head-1-x86_64.pkg.tar.zst";
+const CLEPSYDRE_PACKAGE_URL: &str = "https://github.com/Mccalabrese/Genoa/releases/download/v0.1.0/clepsydre-git-r.head-1-x86_64.pkg.tar.zst";
+const CLEPSYDRE_PACKAGE_SHA256: &str =
+    "fb17aa2066ec7d3a2e9ebb7b066b4547c9a22ab76e687ad45e9cc64541369852";
+
 /// installs packages via pacman with --needed and --noconfirm
 pub fn install_pacman_packages(
     sys: &impl CmdExecutor,
@@ -21,6 +26,65 @@ pub fn install_pacman_packages(
     }
     println!("   ✅ Installed packages: {}", packages.join(", "));
     Ok(())
+}
+
+/// Downloads and installs the packaged clepsydre dependency required by the sidebar.
+///
+/// The package is kept outside the repository because it is a locally built, WIP
+/// dependency rather than a package currently available in the configured repos.
+pub fn install_clepsydre_package(
+    sys: &impl CmdExecutor,
+    home: &Path,
+) -> Result<(), std::io::Error> {
+    let cache_dir = home.join(".cache/genoa");
+    sys.create_dir_all(&cache_dir)?;
+
+    let package_path = cache_dir.join(CLEPSYDRE_PACKAGE_NAME);
+    let checksum_path = cache_dir.join("clepsydre-git-r.head-1-x86_64.pkg.tar.zst.sha256");
+    let package_path_str = package_path
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("Invalid clepsydre package path"))?;
+    let checksum_path_str = checksum_path
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("Invalid clepsydre checksum path"))?;
+
+    println!("   ⬇️  Downloading clepsydre dependency...");
+    sys.run_cmd(
+        "curl",
+        &[
+            "--fail",
+            "--location",
+            "--retry",
+            "3",
+            "--retry-delay",
+            "2",
+            "--proto",
+            "=https",
+            "--tlsv1.2",
+            "--output",
+            package_path_str,
+            CLEPSYDRE_PACKAGE_URL,
+        ],
+    )?;
+
+    sys.write_string_to_file(
+        checksum_path_str,
+        &format!("{}  {}\n", CLEPSYDRE_PACKAGE_SHA256, package_path_str),
+    )?;
+    sys.run_cmd("sha256sum", &["--check", checksum_path_str])?;
+
+    println!("   📦 Installing clepsydre dependency...");
+    let install_result = sys.run_cmd(
+        "sudo",
+        &["pacman", "-U", "--needed", "--noconfirm", package_path_str],
+    );
+
+    if install_result.is_ok() {
+        let _ = sys.run_cmd_ignore_err("rm", &["-f", package_path_str, checksum_path_str]);
+        println!("   ✅ Installed clepsydre dependency.");
+    }
+
+    install_result
 }
 
 /// Bootstraps 'yay' from the AUR git repo if not present.
@@ -166,6 +230,33 @@ mod tests {
                 ]
             )
         );
+    }
+
+    #[test]
+    fn test_install_clepsydre_package_downloads_verifies_and_installs() {
+        let env = MockEnv::default();
+        let home = Path::new("/home/testuser");
+
+        let result = install_clepsydre_package(&env, home);
+
+        assert!(result.is_ok());
+        let log = env.cmd_log.borrow();
+        assert_eq!(log.len(), 4);
+        assert_eq!(log[0].0, "curl");
+        assert!(log[0].1.contains(&CLEPSYDRE_PACKAGE_URL.to_string()));
+        assert_eq!(log[1].0, "sha256sum");
+        assert_eq!(log[1].1[0], "--check");
+        assert_eq!(log[2].0, "sudo");
+        assert_eq!(
+            log[2].1[0..4],
+            [
+                "pacman".to_string(),
+                "-U".to_string(),
+                "--needed".to_string(),
+                "--noconfirm".to_string(),
+            ]
+        );
+        assert_eq!(log[3].0, "rm");
     }
 
     #[test]
