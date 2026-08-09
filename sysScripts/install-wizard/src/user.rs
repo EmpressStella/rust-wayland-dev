@@ -6,6 +6,9 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+const GEOCLUE_CONF_PATH: &str = "/etc/geoclue/geoclue.conf";
+const BEACONDB_GEOLOCATE_URL: &str = "https://api.beacondb.net/v1/geolocate";
+
 const RETIRED_TOOL_SOURCES: &[&str] = &[
     "sysScripts/sidebar/build.rs",
     "sysScripts/sidebar/src/calendar_query.c",

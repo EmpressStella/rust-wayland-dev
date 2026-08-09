@@ -276,6 +276,15 @@ fn main() {
         .stderr(Stdio::null())
         .status();
 
+    // Install the sidebar's packaged EDS dependency before compiling the app.
+    if let Err(e) = install_clepsydre_package(&live_sys, &home) {
+        eprintln!(
+            "   ❌ Failed to install the clepsydre dependency required by sidebar: {}",
+            e
+        );
+        std::process::exit(1);
+    }
+
     if let Err(e) = remove_retired_tool_sources(&repo_root) {
         eprintln!("   ❌ Failed to remove retired tool sources: {}", e);
         std::process::exit(1);
