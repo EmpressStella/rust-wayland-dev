@@ -212,19 +212,55 @@ EOF
                 echo "Fetching remote..."
                 git fetch origin main
 
-                # We check if the local 'sysScripts', 'scripts' or 'pkglist.txt' differ from remote.
+                # Track tool changes separately: only they require clearing Cargo output.
                 SCRIPTS_DIFF=0
-                if ! git diff --quiet origin/main -- sysScripts; then SCRIPTS_DIFF=1; fi
+                TOOLS_DIFF=0
+                if ! git diff --quiet origin/main -- sysScripts; then
+                    SCRIPTS_DIFF=1
+                    TOOLS_DIFF=1
+                fi
                 if ! git diff --quiet origin/main -- pkglist.txt; then SCRIPTS_DIFF=1; fi
                 if ! git diff --quiet origin/main -- scripts; then SCRIPTS_DIFF=1; fi
 
+                SYNC_OK=1
                 if [ $SCRIPTS_DIFF -eq 1 ]; then
                     echo -e "\n✨ Updates detected in Tools or Package List!"
                     echo "🧹 Force-syncing sysScripts & pkglist.txt..."
-                    git checkout origin/main -- sysScripts pkglist.txt scripts
-                    echo -e "✅ Files synced. Wizard will compile changes."
+                    if git checkout origin/main -- sysScripts pkglist.txt scripts; then
+                        echo -e "✅ Files synced. Wizard will compile changes."
+                    else
+                        echo "❌ Repo sync failed; skipping the config refresh."
+                        SYNC_OK=0
+                        sys_exit=1
+                    fi
                 else
                     echo "✔ Rust tools and packages are up to date."
+                fi
+
+                if [ $SYNC_OK -eq 1 ]; then
+                    # Cargo cleans build output, but it cannot remove source files that a
+                    # previous version retired. Keep this list explicit and reviewable.
+                    RETIRED_TOOL_SOURCES=(
+                        "sysScripts/sidebar/build.rs"
+                        "sysScripts/sidebar/src/calendar_query.c"
+                    )
+                    RETIRED_SOURCE_REMOVED=0
+                    for retired_source in "${{RETIRED_TOOL_SOURCES[@]}}"; do
+                        retired_path="$REPO_PATH/$retired_source"
+                        if [ -e "$retired_path" ] || [ -L "$retired_path" ]; then
+                            rm -f -- "$retired_path"
+                            RETIRED_SOURCE_REMOVED=1
+                            echo "🧹 Removed retired source: $retired_source"
+                        fi
+                    done
+
+                    if [ $TOOLS_DIFF -eq 1 ] || [ $RETIRED_SOURCE_REMOVED -eq 1 ]; then
+                        echo "🧹 Clearing Cargo build output for updated tools..."
+                        find "$REPO_PATH/sysScripts" -mindepth 2 -maxdepth 2 -name Cargo.toml -print0 |
+                            while IFS= read -r -d '' manifest; do
+                                cargo clean --manifest-path "$manifest"
+                            done
+                    fi
                 fi
             else
                 echo "⚠️ Repo not found. Skipping surgical sync."

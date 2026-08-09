@@ -6,8 +6,26 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-const GEOCLUE_CONF_PATH: &str = "/etc/geoclue/geoclue.conf";
-const BEACONDB_GEOLOCATE_URL: &str = "https://api.beacondb.net/v1/geolocate";
+const RETIRED_TOOL_SOURCES: &[&str] = &[
+    "sysScripts/sidebar/build.rs",
+    "sysScripts/sidebar/src/calendar_query.c",
+];
+
+/// Removes source files intentionally retired by tool migrations.
+///
+/// Cargo can clear compiled output, but a stale untracked `build.rs` is still
+/// discovered automatically and can break the next build.
+pub fn remove_retired_tool_sources(repo_root: &Path) -> Result<(), std::io::Error> {
+    for source in RETIRED_TOOL_SOURCES {
+        let path = repo_root.join(source);
+        if path.is_file() || path.is_symlink() {
+            fs::remove_file(&path)?;
+            println!("   🧹 Removed retired source: {}", source);
+        }
+    }
+
+    Ok(())
+}
 
 pub fn setup_librewolf(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::io::Error> {
     println!("   🐺 Configuring LibreWolf for Human Beings...");
