@@ -1,22 +1,10 @@
-//! Sidebar Styling (CSS)
-//!
-//! This module manages the visual appearance of the application.
-//! It uses the standard GTK4 CSS provider to load a runtime stylesheet.
-//!
-//! Design System:
-//! - **Colors:** Catppuccin-inspired palette (Blue accents, Dark Grey background).
-//! - **Glassmorphism:** Heavy use of semi-transparent backgrounds (`rgba`) and blur effects.
-//! - **Shapes:** Rounded corners (12px for cards, 99px for pills/circles).
+//! Runtime GTK styling for the sidebar.
 
 use gtk4::gdk;
 
 pub fn load_css() {
-    // 1. Create a CSS Provider
-    // This acts as the bridge between our CSS string and the GTK rendering engine.
     let provider = gtk4::CssProvider::new();
 
-    // 2. Define Styles
-    // We load the CSS data directly from memory for a self-contained binary.
     provider.load_from_data(
         "
         /* --- BASE WINDOW & ZONES --- */
@@ -70,11 +58,6 @@ pub fn load_css() {
         }
 
         /* --- TYPOGRAPHY & UTILS --- */
-        .icon-text {
-            font-size: 16px;
-            font-weight: bold;
-        }
-
         .badge {
             background-color: #ff5555; /* Red */
             color: white;
@@ -231,8 +214,6 @@ pub fn load_css() {
     ",
     );
 
-    // 3. Apply to Display
-    // Register this provider for the default screen so all widgets inherit these styles.
     if let Some(display) = gdk::Display::default() {
         gtk4::style_context_add_provider_for_display(
             &display,

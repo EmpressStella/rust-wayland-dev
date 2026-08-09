@@ -1,8 +1,12 @@
 //! Shared helper utilities for sidebar widgets and command execution.
 
-use chrono::{Datelike, Duration, Local, NaiveDate};
+use async_channel::{Receiver, Sender, unbounded};
+use chrono::{DateTime, Datelike, Local, NaiveDate};
+use clepsydre_eds::Manager as EdsManager;
+use clepsydre_rebind::prelude::*;
+use clepsydre_rebind::{Event, Timeframe};
+use gtk4::gio::prelude::ListModelExtManual;
 use gtk4::prelude::*;
-use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -12,7 +16,18 @@ use std::process::{Command, Stdio};
 use std::time::Duration as StdDuration;
 use wait_timeout::ChildExt;
 
-#[derive(Debug, Deserialize, Clone)]
+pub struct CalendarRequest {
+    pub year: i32,
+    pub month: u32,
+}
+
+pub struct CalendarResponse {
+    pub year: i32,
+    pub month: u32,
+    pub events: Vec<CalendarEvent>,
+}
+
+#[derive(Debug, Clone)]
 pub struct CalendarEvent {
     uid: String,
     summary: String,
@@ -33,40 +48,164 @@ pub struct DayAppointment {
     pub all_day: bool,
 }
 
-const CALENDAR_QUERY_HELPER: &str = env!("SIDEBAR_CALENDAR_QUERY_HELPER");
+pub fn spawn_calendar_worker() -> (Sender<CalendarRequest>, Receiver<CalendarResponse>) {
+    let (req_tx, req_rx) = unbounded::<CalendarRequest>();
+    let (resp_tx, resp_rx) = unbounded::<CalendarResponse>();
 
-#[allow(dead_code)]
-pub fn load_calendar_events() -> Vec<CalendarEvent> {
-    let today = Local::now().date_naive();
-    load_calendar_events_for_month(today.year(), today.month())
+    std::thread::spawn(move || {
+        let ctx = glib::MainContext::new();
+        ctx.with_thread_default(|| {
+            let manager = EdsManager::new();
+
+            while let Ok(request) = req_rx.recv_blocking() {
+                let events = query_calendar_events_with(&manager, request.year, request.month);
+                if resp_tx
+                    .send_blocking(CalendarResponse {
+                        year: request.year,
+                        month: request.month,
+                        events,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .unwrap();
+    });
+
+    (req_tx, resp_rx)
 }
 
-pub fn load_calendar_events_for_month(year: i32, month: u32) -> Vec<CalendarEvent> {
+fn query_calendar_events_with(manager: &EdsManager, year: i32, month: u32) -> Vec<CalendarEvent> {
     let start = first_day_of_month(year, month);
     let end = next_month_first_of(year, month);
-    query_calendar_events(start, end)
+    run_calendar_query(manager, start, end)
 }
+fn run_calendar_query(
+    manager: &EdsManager,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> Vec<CalendarEvent> {
+    let tz = glib::TimeZone::local();
 
-fn query_calendar_events(start_date: NaiveDate, end_date: NaiveDate) -> Vec<CalendarEvent> {
-    let start_arg = start_date.format("%Y-%m-%d").to_string();
-    let end_arg = end_date.format("%Y-%m-%d").to_string();
-
-    let Some(output) = run_output_with_retry_with_timeout(
-        CALENDAR_QUERY_HELPER,
-        &[&start_arg, &end_arg],
-        CALENDAR_QUERY_TIMEOUT_MS,
+    let (Ok(start_dt), Ok(end_dt)) = (
+        glib::DateTime::new(
+            &tz,
+            start_date.year(),
+            start_date.month() as i32,
+            start_date.day() as i32,
+            0,
+            0,
+            0.0,
+        ),
+        glib::DateTime::new(
+            &tz,
+            end_date.year(),
+            end_date.month() as i32,
+            end_date.day() as i32,
+            0,
+            0,
+            0.0,
+        ),
     ) else {
         return Vec::new();
     };
 
-    serde_json::from_slice::<Vec<CalendarEvent>>(&output.stdout).unwrap_or_else(|e| {
+    let Ok(timeframe) = Timeframe::new(false, &start_dt, &end_dt) else {
         log_command_failure(
-            "json_parse_failed",
-            CALENDAR_QUERY_HELPER,
-            &[&start_arg, &end_arg],
-            &format!("error={}", e),
+            "clepsydre_timeframe_failed",
+            "clepsydre",
+            &[],
+            "bad timeframe bounds",
         );
-        Vec::new()
+
+        return Vec::new();
+    };
+    let subscription = match manager.new_subscription(&timeframe) {
+        Ok(Some(sub)) => sub,
+        Ok(None) => {
+            log_command_failure(
+                "clepsydre_subscription_none",
+                "clepsydre",
+                &[],
+                "subscription returned None",
+            );
+
+            return Vec::new();
+        }
+
+        Err(e) => {
+            log_command_failure(
+                "clepsydre_subscription_failed",
+                "clepsydre",
+                &[],
+                &e.to_string(),
+            );
+
+            return Vec::new();
+        }
+    };
+
+    let ctx = glib::MainContext::thread_default().unwrap();
+
+    // Give the data source time to publish its initial events. An empty
+    // subscription may still be loading, so only debounce after data arrives.
+    let mut last_count = subscription.n_items();
+    let mut last_change = std::time::Instant::now();
+    let deadline = last_change + std::time::Duration::from_millis(1500);
+    let debounce = std::time::Duration::from_millis(150);
+    let mut has_published_data = last_count > 0;
+
+    loop {
+        while ctx.iteration(false) {}
+
+        let count = subscription.n_items();
+        if count != last_count {
+            last_count = count;
+            last_change = std::time::Instant::now();
+            has_published_data = true;
+        }
+
+        if (has_published_data && last_change.elapsed() >= debounce)
+            || std::time::Instant::now() >= deadline
+        {
+            break;
+        }
+
+        // Avoid busy-spinning while the data source settles.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    subscription
+        .iter::<Event>()
+        .filter_map(Result::ok)
+        .filter_map(event_to_calendar_event)
+        .collect()
+}
+
+fn event_to_calendar_event(event: Event) -> Option<CalendarEvent> {
+    let tf = event.timeframe()?;
+    let start_unix = tf.start_unix();
+    let end_unix = tf.end_unix();
+    let all_day = tf.is_all_day();
+
+    let start = DateTime::from_timestamp(start_unix, 0)?.with_timezone(&Local);
+    let end = DateTime::from_timestamp(end_unix, 0)?.with_timezone(&Local);
+
+    Some(CalendarEvent {
+        uid: event.uri().map(|s| s.to_string()).unwrap_or_default(),
+        summary: event.name().map(|s| s.to_string()).unwrap_or_default(),
+        start_date: start.format("%Y-%m-%d").to_string(),
+        end_date: end.format("%Y-%m-%d").to_string(),
+        display_time: if all_day {
+            "All day".into()
+        } else {
+            start.format("%H:%M").to_string()
+        },
+        duration_minutes: ((end_unix - start_unix) / 60).max(0),
+        all_day,
+        sort_key: start_unix,
     })
 }
 
@@ -83,12 +222,6 @@ fn occurs_on(event: &CalendarEvent, target_date: NaiveDate) -> bool {
     } else {
         start <= target_date && target_date <= end
     }
-}
-
-#[allow(dead_code)]
-pub fn get_day_appointments(date: NaiveDate) -> Vec<DayAppointment> {
-    let events = query_calendar_events(date, date + Duration::days(1));
-    get_day_appointments_from_events(date, &events)
 }
 
 pub fn get_day_appointments_from_events(
@@ -149,15 +282,6 @@ fn get_month_days_with_appointments_from_events(
     days
 }
 
-#[allow(dead_code)]
-fn get_month_days_with_appointments(year: i32, month: u32) -> HashSet<u32> {
-    let events = query_calendar_events(
-        first_day_of_month(year, month),
-        next_month_first_of(year, month),
-    );
-    get_month_days_with_appointments_from_events(year, month, &events)
-}
-
 fn first_day_of_month(year: i32, month: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(year, month, 1).unwrap_or_else(|| Local::now().date_naive())
 }
@@ -171,9 +295,9 @@ fn next_month_first_of(year: i32, month: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(next_year, next_month, 1).unwrap_or_else(|| Local::now().date_naive())
 }
 
-// --- Button Factories ---
+// --- Button factories ---
 
-/// Creates a small, square button (20x20) typically used for the Session Control row.
+/// Creates a small square button for session controls.
 pub fn make_squared_button(icon_name: &str, tooltip: &str) -> gtk4::Button {
     let icon = gtk4::Image::builder()
         .icon_name(icon_name)
@@ -187,9 +311,8 @@ pub fn make_squared_button(icon_name: &str, tooltip: &str) -> gtk4::Button {
         .build()
 }
 
-/// Creates a larger, circular button (30x30) used for the Feature Toggles.
+/// Creates a larger circular button for feature toggles.
 pub fn make_icon_button(icon_name: &str, tooltip: &str) -> gtk4::Button {
-    // We explicitly build the Image to control pixel_size, otherwise GTK picks a default.
     let icon = gtk4::Image::builder()
         .icon_name(icon_name)
         .pixel_size(24)
@@ -202,20 +325,17 @@ pub fn make_icon_button(icon_name: &str, tooltip: &str) -> gtk4::Button {
         .tooltip_text(tooltip)
         .build()
 }
-/// Creates a button with a "Notification Badge" overlay (Red circle with number).
-/// Returns tuple: (The Button Widget, The Label Widget for the count).
+/// Creates a circular button with a notification badge.
 pub fn make_badged_button(
     icon_name: &str,
     count: &str,
     tooltip: &str,
 ) -> (gtk4::Button, gtk4::Label) {
-    // 1. Base Layer: The Icon
     let icon = gtk4::Image::builder()
         .icon_name(icon_name)
         .pixel_size(24)
         .build();
 
-    // 2. Top Layer: The Badge
     let badge = gtk4::Label::builder()
         .label(count)
         .css_classes(vec!["badge".to_string()])
@@ -224,11 +344,9 @@ pub fn make_badged_button(
         .visible(count != "0") // Auto-hide if count is zero
         .build();
 
-    // 3. Stack them using GTK Overlay
     let overlay = gtk4::Overlay::builder().child(&icon).build();
     overlay.add_overlay(&badge);
 
-    // 4. Wrap in Button
     let btn = gtk4::Button::builder()
         .child(&overlay)
         .css_classes(vec!["circular-btn".to_string()])
@@ -238,18 +356,7 @@ pub fn make_badged_button(
     (btn, badge)
 }
 
-// --- Calendar Logic ---
-
-/// Generates a Month View Grid for the given Year/Month.
-/// Handles the math for "Empty slots before the 1st" and "Total days in month".
-#[allow(dead_code)]
-pub fn build_calendar_grid(year: i32, month: u32) -> gtk4::Grid {
-    let events = query_calendar_events(
-        first_day_of_month(year, month),
-        next_month_first_of(year, month),
-    );
-    build_calendar_grid_from_events(year, month, &events)
-}
+// --- Calendar rendering ---
 
 pub fn build_calendar_grid_from_events(
     year: i32,
@@ -267,7 +374,6 @@ pub fn build_calendar_grid_from_events(
         .row_homogeneous(true)
         .build();
 
-    // 1. Draw Headers (Su, Mo, Tu...)
     let days = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
     for (i, day) in days.iter().enumerate() {
         let label = gtk4::Label::builder()
@@ -275,19 +381,15 @@ pub fn build_calendar_grid_from_events(
             .css_classes(vec!["calendar-header".to_string()])
             .hexpand(true)
             .build();
-        grid.attach(&label, i as i32, 0, 1, 1); // Row 0 is reserved for headers
+        grid.attach(&label, i as i32, 0, 1, 1);
     }
 
     let Some(first_day) = NaiveDate::from_ymd_opt(year, month, 1) else {
         return grid;
     };
 
-    // Calculate padding: If Nov 1st is Wednesday (3), we need 3 empty slots (Sun, Mon, Tue).
     let start_offset = first_day.weekday().num_days_from_sunday();
 
-    // Calculate total days in month:
-    // Rust's chrono doesn't have `days_in_month()`, so we subtract:
-    // (First day of NEXT month) - (First day of THIS month)
     let next_month = if month == 12 { 1 } else { month + 1 };
     let next_year = if month == 12 { year + 1 } else { year };
     let Some(next_first) = NaiveDate::from_ymd_opt(next_year, next_month, 1) else {
@@ -296,14 +398,12 @@ pub fn build_calendar_grid_from_events(
     let days_in_month = next_first.signed_duration_since(first_day).num_days();
     let appointment_days = get_month_days_with_appointments_from_events(year, month, events);
 
-    // 3. Render the Grid
     let mut col = start_offset as i32;
-    let mut row = 1; // Start at Row 1
+    let mut row = 1;
 
     let today = Local::now().date_naive();
 
     for day_num in 1..=days_in_month {
-        // Build the Cell Content (Vertical Box: Number + Dot)
         let vbox = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         vbox.set_valign(gtk4::Align::Center);
 
@@ -312,13 +412,12 @@ pub fn build_calendar_grid_from_events(
             .css_classes(vec!["calendar-day-num".to_string()])
             .build();
 
-        // Appointment Indicator (Red dot) based on GNOME Calendar data.
         let has_appointment = appointment_days.contains(&(day_num as u32));
 
         let dot_label = gtk4::Label::builder()
             .label("•")
             .css_classes(vec!["calendar-dot".to_string()])
-            .visible(has_appointment) // <--- Logic hooks here later
+            .visible(has_appointment)
             .build();
 
         vbox.append(&num_label);
@@ -329,7 +428,6 @@ pub fn build_calendar_grid_from_events(
         if today.year() == year && today.month() == month && today.day() == day_num as u32 {
             btn_classes.push("today".to_string());
         }
-        // Wrap in a transparent button to make it clickable
         let btn = gtk4::Button::builder()
             .child(&vbox)
             .css_classes(btn_classes)
@@ -338,7 +436,6 @@ pub fn build_calendar_grid_from_events(
             .valign(gtk4::Align::Fill)
             .build();
 
-        // Click Action: Open GNOME Calendar focused on this date.
         btn.connect_clicked(move |_| {
             let date_arg = format!("{}-{}-{}", year, month, day_num);
             run_command("gnome-calendar", &["--date", date_arg.as_str()]);
@@ -346,7 +443,6 @@ pub fn build_calendar_grid_from_events(
 
         grid.attach(&btn, col, row, 1, 1);
 
-        // Cursor Management: Move right, wrap to new row if needed
         col += 1;
         if col > 6 {
             col = 0;
@@ -413,7 +509,6 @@ fn resolve_program(program: &str) -> String {
 
 // Shared command policy for external tools invoked by the sidebar.
 const CMD_TIMEOUT_MS: u64 = 5000;
-const CALENDAR_QUERY_TIMEOUT_MS: u64 = 60000;
 const CMD_RETRIES: usize = 2;
 const RETRY_BACKOFF_MS: u64 = 120;
 

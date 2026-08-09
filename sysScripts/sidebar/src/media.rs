@@ -1,12 +1,11 @@
-//! Media widget backed by playerctl.
+//! Small playerctl-backed media card.
 //!
-//! The card stays hidden when no MPRIS player is active and updates once per second.
+//! The card is hidden when no MPRIS player is available and refreshed once per second.
 
 use crate::helpers; // Shared helper for running shell commands
+use async_channel::unbounded;
 use gtk4::prelude::*;
 use gtk4::{Align, Box, Button, Label, Orientation};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
 
 struct MediaSnapshot {
     status: String,
@@ -28,12 +27,8 @@ fn parse_media_snapshot(out: &[u8]) -> Option<MediaSnapshot> {
     })
 }
 
-/// Builds the Media Player card.
+/// Builds the media card and starts its background metadata poller.
 pub fn build() -> Box {
-    // 1. The Container (Hidden by Default)
-    // We start with visibility set to FALSE. The polling loop will turn it TRUE
-    // only if it successfully gets metadata from a player.
-    // This ensures the sidebar doesn't show an empty/broken player.
     let container = Box::builder()
         .orientation(Orientation::Vertical)
         .css_classes(vec!["media-card"])
@@ -41,9 +36,6 @@ pub fn build() -> Box {
         .halign(Align::Fill)
         .build();
 
-    // 2. Metadata Labels (Title & Artist)
-    // We use ellipsize settings to ensure long song titles don't stretch the sidebar
-    // or break the layout. They will show as "Song Title..." if too long.
     let title_label = Label::builder()
         .label("Unknown Title")
         .css_classes(vec!["media-title"])
@@ -62,7 +54,6 @@ pub fn build() -> Box {
         .halign(Align::Center)
         .build();
 
-    // 3. Playback Controls (Prev | Play/Pause | Next)
     let controls = Box::builder()
         .orientation(Orientation::Horizontal)
         .halign(Align::Center)
@@ -83,10 +74,6 @@ pub fn build() -> Box {
         .css_classes(vec!["media-btn"])
         .build();
 
-    // --- Signal Handlers ---
-    // These buttons simply fire-and-forget commands to playerctl.
-    // We rely on the polling loop to update the UI state (e.g. changing Pause to Play icon).
-
     btn_prev.connect_clicked(|_| {
         helpers::run_command("playerctl", &["previous"]);
     });
@@ -97,9 +84,6 @@ pub fn build() -> Box {
     let btn_play_clone = btn_play.clone();
     btn_play.connect_clicked(move |_| {
         helpers::run_command("playerctl", &["play-pause"]);
-        // Note: We don't manually change the icon here.
-        // We let the next poll cycle (max 1s delay) detect the state change.
-        // This prevents the UI from getting out of sync if the command fails.
     });
 
     controls.append(&btn_prev);
@@ -110,18 +94,29 @@ pub fn build() -> Box {
     container.append(&artist_label);
     container.append(&controls);
 
-    // Poll from the GTK loop, but run command I/O on a worker thread.
+    // Keep playerctl off the GTK thread and deliver results through GLib.
     let container_poll = container.clone();
     let title_poll = title_label.clone();
     let artist_poll = artist_label.clone();
     let play_btn_poll = btn_play_clone.clone();
 
-    let (tx, rx) = mpsc::channel::<Option<MediaSnapshot>>();
-    let in_flight = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = unbounded::<Option<MediaSnapshot>>();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let output = helpers::get_output(
+                "playerctl",
+                &["metadata", "--format", "{{status}};;{{title}};;{{artist}}"],
+            );
+            let parsed = output.as_deref().and_then(parse_media_snapshot);
+            if tx.send_blocking(parsed).is_err() {
+                break;
+            }
+        }
+    });
 
-    // Runs every 1 second
-    glib::timeout_add_seconds_local(1, move || {
-        if let Ok(snapshot) = rx.try_recv() {
+    glib::MainContext::default().spawn_local(async move {
+        while let Ok(snapshot) = rx.recv().await {
             match snapshot {
                 Some(data) => {
                     container_poll.set_visible(true);
@@ -138,24 +133,6 @@ pub fn build() -> Box {
                 }
             }
         }
-
-        // Keep at most one fetch in flight to avoid thread pileups under slow/hung MPRIS.
-        if !in_flight.swap(true, Ordering::AcqRel) {
-            let tx_bg = tx.clone();
-            let in_flight_bg = Arc::clone(&in_flight);
-            std::thread::spawn(move || {
-                let output = helpers::get_output(
-                    "playerctl",
-                    &["metadata", "--format", "{{status}};;{{title}};;{{artist}}"],
-                );
-                let parsed = output.as_deref().and_then(parse_media_snapshot);
-                let _ = tx_bg.send(parsed);
-                in_flight_bg.store(false, Ordering::Release);
-            });
-        }
-
-        // Return Continue to keep the loop running
-        glib::ControlFlow::Continue
     });
 
     container

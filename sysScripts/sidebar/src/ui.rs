@@ -3,6 +3,7 @@
 //! This module builds the GTK layout, connects controls, and coordinates background
 //! polling so command I/O does not block the main loop.
 
+use async_channel::unbounded;
 use chrono::{Datelike, Local, NaiveDate};
 use gtk4::prelude::*;
 use gtk4::{Align, Application, ApplicationWindow, Box, Orientation};
@@ -10,8 +11,6 @@ use gtk4_layer_shell::{Edge, Layer, LayerShell};
 use serde_json::Value;
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
 
 use crate::helpers;
 use crate::media;
@@ -23,17 +22,10 @@ struct SliderSnapshot {
     volume: Option<f64>,
 }
 
-#[derive(Clone)]
 struct CalendarMonthSnapshot {
     year: i32,
     month: u32,
     events: Vec<helpers::CalendarEvent>,
-}
-
-#[derive(Clone)]
-struct CalendarRequestState {
-    in_flight: Arc<AtomicBool>,
-    loaded_month: Rc<RefCell<Option<(i32, u32)>>>,
 }
 
 // Parse brightnessctl CSV output and return percentage in [0, 100].
@@ -54,36 +46,24 @@ fn parse_volume_pct(out: &[u8]) -> Option<f64> {
 }
 
 pub fn build_ui(app: &Application) {
-    // 1. Setup Window (Fixed Width)
-    // Since we rely on the compositor (Sway/Niri) to place the window on the active monitor,
-    // we cannot easily query the screen dimensions beforehand.
-    // 400px is a safe, usable default for a sidebar.
+    // The compositor places the layer on the active monitor, so use a stable width.
     let final_width = 400;
-
+    let (calendar_req_tx, calendar_worker_rx) = helpers::spawn_calendar_worker();
     let window = ApplicationWindow::builder()
         .application(app)
         .default_width(final_width)
         .title("My Sidebar")
         .build();
 
-    // 2. Initialize Layer Shell
-    // This tells the compositor "I am a panel/overlay, not a normal window."
     window.init_layer_shell();
 
-    // OnDemand allows us to take keyboard focus when clicked (needed for specific interactions),
-    // but pass it back to the underlying app when ignored.
     window.set_keyboard_mode(gtk4_layer_shell::KeyboardMode::OnDemand);
     window.set_layer(Layer::Overlay);
 
-    // Monitor Auto-Detection
-    // Passing `None` tells the protocol to assign this window to the monitor
-    // containing the active mouse pointer. This solves multi-monitor focus issues natively.
     window.set_monitor(None);
 
-    // --- HOVER GUARD (Sway Focus Fix) ---
-    // In tiling WMs like Sway, clicking a button inside this window might momentarily
-    // cause the window to report "lost focus" before the click registers.
-    // We track the mouse position to ignore false-positive close events.
+    // Keep the sidebar open while the pointer is over it. This avoids false close
+    // events when a compositor briefly reports lost focus during a click.
     let is_hovered = Rc::new(RefCell::new(false));
     let hover_controller = gtk4::EventControllerMotion::new();
     let is_hovered_enter = is_hovered.clone();
@@ -99,34 +79,19 @@ pub fn build_ui(app: &Application) {
 
     window.add_controller(hover_controller);
 
-    // --- SMART CLOSE LOGIC ---
     let is_hovered_close = is_hovered.clone();
     let launch_time = std::time::Instant::now();
 
-    // Track if we ever successfully grabbed focus
-    let has_been_active = Rc::new(RefCell::new(false));
-    let has_been_active_clone = has_been_active.clone();
-
     window.connect_is_active_notify(move |win| {
-        if win.is_active() {
-            // We got focus! Mark it.
-            *has_been_active_clone.borrow_mut() = true;
-        } else {
-            // We LOST focus (or never had it). Should we close?
-
-            // 1. Startup Grace Period:
-            // Sway needs more time than Hyprland. Bump to 1500ms.
+        if !win.is_active() {
             if launch_time.elapsed().as_millis() < 2000 {
                 return;
             }
 
-            // 3. Hover Guard:
-            // If mouse is physically over the window, don't close.
             if *is_hovered_close.borrow() {
                 return;
             }
 
-            // Marker used by the toggle script to detect a user-close event.
             let _ = std::process::Command::new("touch")
                 .arg("/tmp/sidebar_just_closed")
                 .output();
@@ -135,15 +100,11 @@ pub fn build_ui(app: &Application) {
         }
     });
 
-    // 3. Anchor it
-    // Pin the window to the Right side, stretching from Top to Bottom.
     window.set_anchor(Edge::Right, true);
     window.set_anchor(Edge::Top, true);
     window.set_anchor(Edge::Bottom, true);
     window.set_width_request(final_width);
 
-    // --- BUILD UI LAYOUT ---
-    // Load external CSS for styling (transparency, rounded corners, colors).
     style::load_css();
     let main_box = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
     main_box.set_margin_top(10);
@@ -151,11 +112,9 @@ pub fn build_ui(app: &Application) {
     main_box.set_margin_start(10);
     main_box.set_margin_end(10);
 
-    // --- ZONE 1: TOP (Quick Toggles) ---
     let top_box = gtk4::Box::new(gtk4::Orientation::Vertical, 15);
-    top_box.add_css_class("zone"); // Adds the semi-transparent background card
+    top_box.add_css_class("zone");
 
-    // Row 1: Session Controls (Logout, Reboot, etc.)
     let row_session = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
     row_session.set_homogeneous(true); // Force all buttons to equal width
     let btn_idle = helpers::make_squared_button("view-conceal-symbolic", "Idle Inhibit");
@@ -172,12 +131,10 @@ pub fn build_ui(app: &Application) {
     row_session.append(&btn_restart);
     row_session.append(&btn_power);
 
-    // Row 2: Feature Toggles
     let row_toggles = gtk4::Box::new(gtk4::Orientation::Horizontal, 15);
     row_toggles.set_homogeneous(true);
 
     let btn_radio = helpers::make_icon_button("multimedia-player-symbolic", "Internet Radio");
-    // Returns a button AND its badge label so we can update the number later
     let (btn_update, lbl_update_badge) =
         helpers::make_badged_button("software-update-available-symbolic", "0", "Update System");
     let btn_air = helpers::make_icon_button("airplane-mode-symbolic", "Airplane Mode");
@@ -233,8 +190,6 @@ pub fn build_ui(app: &Application) {
     top_box.append(&box_brightness);
     top_box.append(&box_volume);
 
-    // --- ZONE 2: MIDDLE (Media & SysInfo) ---
-    // This box expands to fill all available vertical space, pushing Top and Bottom zones apart.
     let middle_box = Box::builder()
         .orientation(Orientation::Vertical)
         .spacing(10)
@@ -242,15 +197,12 @@ pub fn build_ui(app: &Application) {
         .vexpand(true)
         .build();
 
-    // Dynamic Media Player (Slides in via `media.rs` logic only when playing)
     let media_widget = media::build();
     middle_box.append(&media_widget);
 
-    // Static System Information (Host, Kernel, Uptime)
     let sys_widget = sysinfo::build();
     middle_box.append(&sys_widget);
 
-    // --- ZONE 3: FINANCE TICKER ---
     let finance_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     finance_box.add_css_class("zone");
 
@@ -270,12 +222,10 @@ pub fn build_ui(app: &Application) {
     finance_box.append(&finance_label);
     finance_box.append(&finance_hint);
 
-    // Make the ticker clickable to launch the TUI app
     let click_gesture = gtk4::GestureClick::new();
     finance_box.add_controller(click_gesture.clone());
 
-    // --- ZONE 4: CALENDAR ---
-    let calendar_height = 300; // Fixed height since we removed screen calculation
+    let calendar_height = 300;
     let bottom_box = gtk4::Box::new(gtk4::Orientation::Vertical, 5);
     bottom_box.add_css_class("zone");
     bottom_box.set_height_request(calendar_height);
@@ -325,65 +275,45 @@ pub fn build_ui(app: &Application) {
     month_view_box.append(&nav_box);
     month_view_box.append(&grid_container);
 
-    // Calendar Logic: State Management
     let current_view_date = Rc::new(RefCell::new(Local::now().date_naive()));
     let calendar_cache: Rc<RefCell<Option<CalendarMonthSnapshot>>> = Rc::new(RefCell::new(None));
-    let calendar_request_state = CalendarRequestState {
-        in_flight: Arc::new(AtomicBool::new(false)),
-        loaded_month: Rc::new(RefCell::new(None)),
-    };
-    let (calendar_tx, calendar_rx) = mpsc::channel::<CalendarMonthSnapshot>();
+
+    // Keep one cached month and one request in flight at a time.
+    let loaded_month = Rc::new(RefCell::new(None::<(i32, u32)>));
+    let is_in_flight = Rc::new(RefCell::new(false));
+
     let request_calendar_month = {
-        let calendar_tx = calendar_tx.clone();
-        let calendar_request_state = calendar_request_state.clone();
+        let loaded_month_req = loaded_month.clone();
+        let is_in_flight_req = is_in_flight.clone();
+        let calendar_req_tx = calendar_req_tx.clone();
+
         Rc::new(move |date: NaiveDate| {
             let month_key = (date.year(), date.month());
-            if *calendar_request_state.loaded_month.borrow() == Some(month_key) {
+
+            // Drop duplicate or overlapping requests
+            if *loaded_month_req.borrow() == Some(month_key) || *is_in_flight_req.borrow() {
                 return;
             }
 
-            if calendar_request_state
-                .in_flight
-                .swap(true, Ordering::AcqRel)
-            {
-                return;
-            }
-
-            let calendar_tx_bg = calendar_tx.clone();
-            let calendar_in_flight_bg = Arc::clone(&calendar_request_state.in_flight);
-            std::thread::spawn(move || {
-                let events = helpers::load_calendar_events_for_month(month_key.0, month_key.1);
-                if let Err(error) = calendar_tx_bg.send(CalendarMonthSnapshot {
-                    year: month_key.0,
-                    month: month_key.1,
-                    events,
-                }) {
-                    helpers::log_command_failure(
-                        "calendar_worker_send_failed",
-                        "sidebar",
-                        &[],
-                        &error.to_string(),
-                    );
-                }
-                calendar_in_flight_bg.store(false, Ordering::Release);
+            *is_in_flight_req.borrow_mut() = true;
+            let _ = calendar_req_tx.send_blocking(helpers::CalendarRequest {
+                year: month_key.0,
+                month: month_key.1,
             });
         })
     };
-    let grid_container_weak = grid_container.clone();
-    let label_month_weak = label_month.clone();
+    let grid_container = grid_container.clone();
+    let label_month = label_month.clone();
     let view_date_state = current_view_date.clone();
     let calendar_cache_for_grid = calendar_cache.clone();
     let request_calendar_month_for_grid = request_calendar_month.clone();
 
-    // Grid Redraw Function
     let refresh_grid = move || {
         let date = *view_date_state.borrow();
-        label_month_weak.set_label(&date.format("%B %Y").to_string());
-        // Remove old rows
-        while let Some(child) = grid_container_weak.first_child() {
-            grid_container_weak.remove(&child);
+        label_month.set_label(&date.format("%B %Y").to_string());
+        while let Some(child) = grid_container.first_child() {
+            grid_container.remove(&child);
         }
-        // Build new rows via helper
         let cache = calendar_cache_for_grid.borrow();
         let empty_events: &[helpers::CalendarEvent] = &[];
         let events = cache
@@ -397,10 +327,10 @@ pub fn build_ui(app: &Application) {
         }
 
         let new_grid = helpers::build_calendar_grid_from_events(date.year(), date.month(), events);
-        grid_container_weak.append(&new_grid);
+        grid_container.append(&new_grid);
     };
 
-    refresh_grid(); // Initial Draw
+    refresh_grid();
 
     let shift_month = |date: chrono::NaiveDate, delta: i32| -> chrono::NaiveDate {
         let mut year = date.year();
@@ -427,7 +357,6 @@ pub fn build_ui(app: &Application) {
         chrono::NaiveDate::from_ymd_opt(year, target_month, 1).unwrap_or(date)
     };
 
-    // Calendar Navigation Handlers
     let view_date_prev = current_view_date.clone();
     let refresh_prev = refresh_grid.clone();
     btn_prev.connect_clicked(move |_| {
@@ -448,7 +377,6 @@ pub fn build_ui(app: &Application) {
 
     main_stack.add_titled(&month_view_box, Some("month_view"), "Month");
 
-    // View B: Day View (real appointments from GNOME Calendar / Evolution Data Server)
     let day_view_box = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
     day_view_box.set_margin_top(20);
     day_view_box.set_margin_start(10);
@@ -540,20 +468,24 @@ pub fn build_ui(app: &Application) {
     let calendar_cache_update = calendar_cache.clone();
     let refresh_grid_update = refresh_grid.clone();
     let refresh_day_update = refresh_day_view.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-        let mut latest_snapshot = None;
-        while let Ok(snapshot) = calendar_rx.try_recv() {
-            latest_snapshot = Some(snapshot);
-        }
+    let loaded_month_resp = loaded_month.clone();
+    let is_in_flight_resp = is_in_flight.clone();
 
-        if let Some(snapshot) = latest_snapshot {
-            *calendar_request_state.loaded_month.borrow_mut() =
-                Some((snapshot.year, snapshot.month));
-            *calendar_cache_update.borrow_mut() = Some(snapshot);
+    // The async channel wakes this task when the worker has finished.
+    glib::MainContext::default().spawn_local(async move {
+        while let Ok(response) = calendar_worker_rx.recv().await {
+            *is_in_flight_resp.borrow_mut() = false;
+
+            *loaded_month_resp.borrow_mut() = Some((response.year, response.month));
+            *calendar_cache_update.borrow_mut() = Some(CalendarMonthSnapshot {
+                year: response.year,
+                month: response.month,
+                events: response.events,
+            });
+
             refresh_grid_update();
             refresh_day_update();
         }
-        glib::ControlFlow::Continue
     });
 
     let day_prev_state = current_view_date.clone();
@@ -670,37 +602,34 @@ pub fn build_ui(app: &Application) {
     btn_dns.connect_clicked(move |_| {
         helpers::run_home_bin("cf-toggle", &[]);
         let btn_target = btn_dns_poll.clone();
-        // UI timer stays non-blocking; status fetches happen off-thread.
-        let (dns_tx, dns_rx) = mpsc::channel::<Option<Vec<u8>>>();
-        let dns_in_flight = Arc::new(AtomicBool::new(false));
-        let mut attempts = 0;
-        glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
-            if let Ok(Some(stdout)) = dns_rx.try_recv()
-                && let Ok(json) = serde_json::from_slice::<Value>(&stdout)
-                && let Some(class) = json.get("class").and_then(|v| v.as_str())
-            {
-                if class == "on" {
-                    btn_target.add_css_class("active");
-                } else {
-                    btn_target.remove_css_class("active");
+        let (dns_tx, dns_rx) = unbounded::<Option<Vec<u8>>>();
+        std::thread::spawn(move || {
+            for _ in 0..45 {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if dns_tx
+                    .send_blocking(helpers::get_output_home_bin("cf-status", &[]))
+                    .is_err()
+                {
+                    break;
                 }
             }
+        });
 
-            attempts += 1;
-            if !dns_in_flight.swap(true, Ordering::AcqRel) {
-                let dns_tx_bg = dns_tx.clone();
-                let dns_in_flight_bg = Arc::clone(&dns_in_flight);
-                std::thread::spawn(move || {
-                    let out = helpers::get_output_home_bin("cf-status", &[]);
-                    let _ = dns_tx_bg.send(out);
-                    dns_in_flight_bg.store(false, Ordering::Release);
-                });
-            }
+        glib::MainContext::default().spawn_local(async move {
+            while let Ok(status) = dns_rx.recv().await {
+                let Some(stdout) = status else {
+                    continue;
+                };
 
-            if attempts >= 45 {
-                glib::ControlFlow::Break
-            } else {
-                glib::ControlFlow::Continue
+                if let Ok(json) = serde_json::from_slice::<Value>(&stdout)
+                    && let Some(class) = json.get("class").and_then(|v| v.as_str())
+                {
+                    if class == "on" {
+                        btn_target.add_css_class("active");
+                    } else {
+                        btn_target.remove_css_class("active");
+                    }
+                }
             }
         });
     });
@@ -715,27 +644,29 @@ pub fn build_ui(app: &Application) {
 
     // Update Checker (Background Thread)
     // Runs checkupdates/yay every 30 minutes to avoid spamming the CPU/Network.
-    let (update_tx, update_rx) = std::sync::mpsc::channel();
-    let lbl_update_target = lbl_update_badge.clone();
+    let (update_tx, update_rx) = unbounded::<Vec<u8>>();
     std::thread::spawn(move || {
         loop {
-            if let Some(stdout) = helpers::get_output_home_bin("update-check", &[]) {
-                let _ = update_tx.send(stdout);
+            if let Some(stdout) = helpers::get_output_home_bin("update-check", &[])
+                && update_tx.send_blocking(stdout).is_err()
+            {
+                break;
             }
             std::thread::sleep(std::time::Duration::from_secs(1800));
         }
     });
 
-    // Update Checker (UI Receiver)
-    glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
-        if let Ok(stdout) = update_rx.try_recv()
-            && let Ok(json) = serde_json::from_slice::<Value>(&stdout)
-            && let Some(text) = json.get("text").and_then(|v| v.as_str())
-        {
-            lbl_update_target.set_label(text);
-            lbl_update_target.set_visible(text != "0");
+    // Update Checker (GLib async receiver)
+    let lbl_update_target = lbl_update_badge.clone();
+    glib::MainContext::default().spawn_local(async move {
+        while let Ok(stdout) = update_rx.recv().await {
+            if let Ok(json) = serde_json::from_slice::<Value>(&stdout)
+                && let Some(text) = json.get("text").and_then(|v| v.as_str())
+            {
+                lbl_update_target.set_label(text);
+                lbl_update_target.set_visible(text != "0");
+            }
         }
-        glib::ControlFlow::Continue
     });
 
     // Airplane Mode (Optimistic UI)
@@ -766,68 +697,60 @@ pub fn build_ui(app: &Application) {
         helpers::run_in_ghostty("waybar-finance", "waybar-finance", &["--tui"]);
     });
 
-    let (sender, receiver) = std::sync::mpsc::channel();
+    let (sender, receiver) = unbounded::<Option<Vec<u8>>>();
     std::thread::spawn(move || {
         let output = helpers::get_output_home_bin("waybar-finance", &[]);
-        let _ = sender.send(output);
+        let _ = sender.send_blocking(output);
     });
 
     let finance_label_update = finance_label.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-        if let Ok(Some(stdout)) = receiver.try_recv() {
-            if let Ok(json) = serde_json::from_slice::<Value>(&stdout)
-                && let Some(text) = json.get("text").and_then(|v| v.as_str())
-            {
-                // Manual HTML/Pango parsing to format the grid
-                // (The API returns raw HTML spans, we need to insert newlines every 4 items)
-                let raw_items: Vec<&str> = text.split("</span> ").collect();
-                let mut grid_text = String::new();
-                for (i, item) in raw_items.iter().enumerate() {
-                    if item.trim().is_empty() {
-                        continue;
-                    }
-                    grid_text.push_str(item);
-                    if !item.ends_with("</span>") {
-                        grid_text.push_str("</span>");
-                    }
-                    if (i + 1) % 3 == 0 {
-                        grid_text.push('\n');
-                    } else {
-                        grid_text.push_str("      ");
-                    }
+    glib::MainContext::default().spawn_local(async move {
+        if let Ok(Some(stdout)) = receiver.recv().await
+            && let Ok(json) = serde_json::from_slice::<Value>(&stdout)
+            && let Some(text) = json.get("text").and_then(|v| v.as_str())
+        {
+            // Format the returned spans into rows for the narrow sidebar.
+            let raw_items: Vec<&str> = text.split("</span> ").collect();
+            let mut grid_text = String::new();
+            for (i, item) in raw_items.iter().enumerate() {
+                if item.trim().is_empty() {
+                    continue;
                 }
-                finance_label_update.set_markup(&grid_text);
-                if let Some(tt) = json.get("tooltip").and_then(|v| v.as_str()) {
-                    finance_label_update.set_tooltip_markup(Some(tt));
+                grid_text.push_str(item);
+                if !item.ends_with("</span>") {
+                    grid_text.push_str("</span>");
+                }
+                if (i + 1) % 3 == 0 {
+                    grid_text.push('\n');
+                } else {
+                    grid_text.push_str("      ");
                 }
             }
-            glib::ControlFlow::Break
-        } else {
-            glib::ControlFlow::Continue
+            finance_label_update.set_markup(&grid_text);
+            if let Some(tt) = json.get("tooltip").and_then(|v| v.as_str()) {
+                finance_label_update.set_tooltip_markup(Some(tt));
+            }
         }
     });
 
-    // ================= MASTER STATUS LOADER =================
-    // To ensure the sidebar opens INSTANTLY, we don't block the main thread checking states.
-    // Instead, we spawn one worker thread to check DNS, Airplane, Mute, Volume, and Brightness
-    // in parallel, then update the UI once the data arrives (approx 50-100ms later).
+    // Load the initial status without blocking the GTK thread.
     let btn_dns_load = btn_dns.clone();
     let btn_air_load = btn_air.clone();
     let btn_mute_load = btn_mute.clone();
     let scale_bright_load = scale_brightness.clone();
     let scale_vol_load = scale_volume.clone();
 
-    let (status_tx, status_rx) = std::sync::mpsc::channel();
+    let (status_tx, status_rx) = unbounded();
     std::thread::spawn(move || {
         let dns_o = helpers::get_output_home_bin("cf-status", &[]);
         let air_o = helpers::get_output("rfkill", &["list", "wlan"]);
         let mute_o = helpers::get_output("wpctl", &["get-volume", "@DEFAULT_AUDIO_SINK@"]);
         let bright_o = helpers::get_output("brightnessctl", &["i", "-m"]);
-        let _ = status_tx.send((dns_o, air_o, mute_o, bright_o));
+        let _ = status_tx.send_blocking((dns_o, air_o, mute_o, bright_o));
     });
 
-    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-        if let Ok((dns_o, air_o, mute_o, bright_o)) = status_rx.try_recv() {
+    glib::MainContext::default().spawn_local(async move {
+        if let Ok((dns_o, air_o, mute_o, bright_o)) = status_rx.recv().await {
             // Apply DNS State
             if let Some(out) = dns_o
                 && let Ok(json) = serde_json::from_slice::<Value>(&out)
@@ -860,46 +783,26 @@ pub fn build_ui(app: &Application) {
             {
                 scale_bright_load.set_value(val);
             }
-            glib::ControlFlow::Break
-        } else {
-            glib::ControlFlow::Continue
         }
     });
 
-    // ================= SLIDER WATCHER =================
-    // Watches for EXTERNAL changes (e.g., hardware keys) to update the sliders.
-    // Respects the "Interaction Guard" to avoid fighting the user.
+    // Refresh slider values changed outside the sidebar, while respecting the
+    // interaction guard so a drag is not overwritten.
     let scale_bright_watch = scale_brightness.clone();
     let scale_vol_watch = scale_volume.clone();
     let last_interaction_watch = last_interaction.clone();
 
-    // Background poll result channel for external brightness/volume changes.
-    let (slider_tx, slider_rx) = mpsc::channel::<SliderSnapshot>();
-    let slider_in_flight = Arc::new(AtomicBool::new(false));
+    glib::MainContext::default().spawn_local(async move {
+        loop {
+            glib::timeout_future_seconds(1).await;
 
-    glib::timeout_add_seconds_local(1, move || {
-        if let Ok(snapshot) = slider_rx.try_recv() {
-            if let Some(sys_val) = snapshot.brightness
-                && (scale_bright_watch.value() - sys_val).abs() > 1.0
-            {
-                scale_bright_watch.set_value(sys_val);
+            // Guard: If user touched slider < 3 seconds ago, skip external refresh.
+            if last_interaction_watch.borrow().elapsed().as_secs() < 3 {
+                continue;
             }
-            if let Some(sys_val) = snapshot.volume
-                && (scale_vol_watch.value() - sys_val).abs() > 1.0
-            {
-                scale_vol_watch.set_value(sys_val);
-            }
-        }
 
-        // Guard: If user touched slider < 3 seconds ago, skip external refresh.
-        if last_interaction_watch.borrow().elapsed().as_secs() < 3 {
-            return glib::ControlFlow::Continue;
-        }
-
-        // Keep at most one command batch in flight; avoids overlap on slow systems.
-        if !slider_in_flight.swap(true, Ordering::AcqRel) {
-            let slider_tx_bg = slider_tx.clone();
-            let slider_in_flight_bg = Arc::clone(&slider_in_flight);
+            // Run command I/O off-thread and await its result from the GLib loop.
+            let (slider_tx, slider_rx) = unbounded::<SliderSnapshot>();
             std::thread::spawn(move || {
                 let brightness = helpers::get_output("brightnessctl", &["i", "-m"])
                     .as_deref()
@@ -908,12 +811,22 @@ pub fn build_ui(app: &Application) {
                     .as_deref()
                     .and_then(parse_volume_pct);
 
-                let _ = slider_tx_bg.send(SliderSnapshot { brightness, volume });
-                slider_in_flight_bg.store(false, Ordering::Release);
+                let _ = slider_tx.send_blocking(SliderSnapshot { brightness, volume });
             });
-        }
 
-        glib::ControlFlow::Continue
+            if let Ok(snapshot) = slider_rx.recv().await {
+                if let Some(sys_val) = snapshot.brightness
+                    && (scale_bright_watch.value() - sys_val).abs() > 1.0
+                {
+                    scale_bright_watch.set_value(sys_val);
+                }
+                if let Some(sys_val) = snapshot.volume
+                    && (scale_vol_watch.value() - sys_val).abs() > 1.0
+                {
+                    scale_vol_watch.set_value(sys_val);
+                }
+            }
+        }
     });
 
     window.present();
