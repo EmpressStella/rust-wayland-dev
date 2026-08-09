@@ -42,8 +42,8 @@ use crate::update::{
 };
 use crate::user::{
     build_custom_apps, finalize_setup, link_dotfiles_and_copy_resources,
-    patch_waybar_sidebar_toggle_path, setup_librewolf, setup_secrets_and_geoclue,
-    setup_waybar_configs,
+    patch_waybar_sidebar_toggle_path, remove_retired_tool_sources, setup_librewolf,
+    setup_secrets_and_geoclue, setup_waybar_configs,
 };
 
 // Hardware Specific: NVIDIA
@@ -274,6 +274,12 @@ fn main() {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+
+    if let Err(e) = remove_retired_tool_sources(&repo_root) {
+        eprintln!("   ❌ Failed to remove retired tool sources: {}", e);
+        std::process::exit(1);
+    }
+
     if let Err(e) = build_custom_apps(&live_sys, &home, &repo_root) {
         println!("   ⚠️  Failed to build custom Rust apps: {}", e);
     };

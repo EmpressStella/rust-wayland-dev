@@ -573,7 +573,7 @@ mod tests {
         assert!(log.iter().any(|entry| {
             entry.0 == "sudo"
                 && entry.1
-                    == vec!["pacman", "-Sy"]
+                    == ["pacman", "-Sy"]
                         .iter()
                         .map(|s| s.to_string())
                         .collect::<Vec<_>>()

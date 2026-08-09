@@ -204,7 +204,7 @@ mod tests {
         assert!(log.iter().any(|entry| {
             entry.0 == "yay"
                 && entry.1
-                    == vec!["-S", "--needed", "--noconfirm", "pkg-a"]
+                    == ["-S", "--needed", "--noconfirm", "pkg-a"]
                         .iter()
                         .map(|s| s.to_string())
                         .collect::<Vec<_>>()
