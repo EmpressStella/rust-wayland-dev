@@ -115,6 +115,7 @@ This system is designed to keep the core tooling fresh without overwriting your 
 
 - **[Manual Installation Guide](docs/MANUAL_INSTALL.md):** Prefer to run commands yourself? Read this.
 - **[Power Management (NVIDIA)](docs/POWER_MANAGEMENT.md):** How I achieved sub-5W idle on a gaming laptop.
+- **[Sidebar Guide](docs/SIDEBAR.md):** Controls, calendar behavior, dependencies, and manual build instructions.
 
 ---
 
@@ -158,13 +159,13 @@ All the helper scripts in this repo have been rewritten in Rust for maximum perf
 
 - **`updater`**: The `on-click` script for the `update-check` module. It simply launches your terminal (`ghostty`) to run the actual system update.
 
-- **`sidebar`**: Sidebar control interface. Includes a calender, finance tooltip that launches TUI on click, launchers to rust binaries, and system controls like brightness and volume.
+- **`sidebar`**: GTK4 control interface with calendar month/day views, a finance launcher, media controls, quick system actions, brightness, and volume.
 
 <p align="center">
   <img src="screenshots/sidebar.png" width="60%" alt="Power Menu formatting"/>
   </p>
 
-- **`cal-tui`**: A calendar app that runs in your terminal. It allows you to add appointments to your calender.
+- **`cal-tui`**: A calendar app that runs in your terminal. It allows you to add appointments to your calendar.
 
 <p align="center">
   <img src="screenshots/CalTuiDay.png" width="45%" alt="Calendar TUI"/>

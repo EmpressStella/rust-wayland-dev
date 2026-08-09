@@ -38,7 +38,8 @@ use crate::live_env::LiveEnv;
 use crate::session::{configure_system, configure_tlp, enforce_session_order};
 use crate::traits::CmdExecutor;
 use crate::update::{
-    get_ignored_packages, install_aur_packages, install_pacman_packages, optimize_pacman_config,
+    get_ignored_packages, install_aur_packages, install_clepsydre_package, install_pacman_packages,
+    optimize_pacman_config,
 };
 use crate::user::{
     build_custom_apps, finalize_setup, link_dotfiles_and_copy_resources,
@@ -274,6 +275,17 @@ fn main() {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+
+    // The sidebar depends on a locally packaged clepsydre build. Install it
+    // before compiling any custom app, including during existing-user updates.
+    if let Err(e) = install_clepsydre_package(&live_sys, &home) {
+        eprintln!(
+            "   ❌ Failed to install the clepsydre dependency required by sidebar: {}",
+            e
+        );
+        std::process::exit(1);
+    }
+
     if let Err(e) = build_custom_apps(&live_sys, &home, &repo_root) {
         println!("   ⚠️  Failed to build custom Rust apps: {}", e);
     };
