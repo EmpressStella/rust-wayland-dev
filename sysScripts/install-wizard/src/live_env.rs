@@ -40,6 +40,14 @@ impl CmdExecutor for LiveEnv {
     fn command_exists(&self, cmd: &str) -> bool {
         command_exists_in_path(cmd, std::env::var_os("PATH").as_deref())
     }
+    fn is_package_installed(&self, package: &str) -> bool {
+        Command::new("pacman")
+            .args(["-Q", package])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
     fn read_file_to_string(&self, path: &std::path::Path) -> Result<String, std::io::Error> {
         std::fs::read_to_string(path)
     }

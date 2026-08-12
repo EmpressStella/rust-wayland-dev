@@ -8,6 +8,7 @@ pub trait CmdExecutor {
         args: &[&str],
     ) -> Result<(), std::io::Error>;
     fn command_exists(&self, cmd: &str) -> bool;
+    fn is_package_installed(&self, package: &str) -> bool;
     fn read_file_to_string(&self, path: &std::path::Path) -> Result<String, std::io::Error>;
     fn get_env_var(&self, key: &str) -> Option<String>;
     fn path_exists(&self, path: &std::path::Path) -> bool;

@@ -3,6 +3,7 @@ use colored::*;
 use std::path::Path;
 
 const CLEPSYDRE_PACKAGE_NAME: &str = "clepsydre-git-r.head-1-x86_64.pkg.tar.zst";
+const CLEPSYDRE_PACKAGE_ID: &str = "clepsydre-git";
 const CLEPSYDRE_PACKAGE_URL: &str = "https://github.com/Mccalabrese/Genoa/releases/download/v0.1.0/clepsydre-git-r.head-1-x86_64.pkg.tar.zst";
 const CLEPSYDRE_PACKAGE_SHA256: &str =
     "fb17aa2066ec7d3a2e9ebb7b066b4547c9a22ab76e687ad45e9cc64541369852";
@@ -36,6 +37,11 @@ pub fn install_clepsydre_package(
     sys: &impl CmdExecutor,
     home: &Path,
 ) -> Result<(), std::io::Error> {
+    if sys.is_package_installed(CLEPSYDRE_PACKAGE_ID) {
+        println!("   ✅ Clepsydre dependency is already installed.");
+        return Ok(());
+    }
+
     let cache_dir = home.join(".cache/genoa");
     sys.create_dir_all(&cache_dir)?;
 
@@ -257,6 +263,18 @@ mod tests {
             ]
         );
         assert_eq!(log[3].0, "rm");
+    }
+
+    #[test]
+    fn test_install_clepsydre_package_skips_download_when_already_installed() {
+        let mut env = MockEnv::default();
+        env.installed_packages
+            .insert(CLEPSYDRE_PACKAGE_ID.to_string());
+
+        let result = install_clepsydre_package(&env, Path::new("/home/testuser"));
+
+        assert!(result.is_ok());
+        assert!(env.cmd_log.borrow().is_empty());
     }
 
     #[test]
