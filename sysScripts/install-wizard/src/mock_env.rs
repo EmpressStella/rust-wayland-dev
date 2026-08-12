@@ -7,6 +7,7 @@ use std::collections::HashSet;
 pub struct MockEnv {
     pub env_vars: std::collections::HashMap<String, String>,
     pub available_commands: HashSet<String>,
+    pub installed_packages: HashSet<String>,
     pub cmd_log: RefCell<Vec<(String, Vec<String>)>>,
     pub mock_files: RefCell<std::collections::HashMap<String, String>>,
     pub mock_dirs: RefCell<HashSet<String>>,
@@ -42,6 +43,9 @@ impl CmdExecutor for MockEnv {
     }
     fn command_exists(&self, cmd: &str) -> bool {
         self.available_commands.contains(cmd)
+    }
+    fn is_package_installed(&self, package: &str) -> bool {
+        self.installed_packages.contains(package)
     }
     fn read_file_to_string(&self, path: &std::path::Path) -> Result<String, std::io::Error> {
         let path_str = path.to_str().unwrap();
