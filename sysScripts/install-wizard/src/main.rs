@@ -74,21 +74,18 @@ const AUR_PACKAGES: &[&str] = &[
 struct RunOptions {
     refresh_mode: bool,
     sync_packages: bool,
-    build_tools: bool,
 }
 
 fn parse_run_options(args: &[String]) -> RunOptions {
     let refresh_mode = args.iter().any(|arg| arg == "--refresh-configs");
 
-    // These flags are updater-only optimizations. A fresh install always performs
-    // both steps, and refresh mode keeps its legacy behavior unless told to skip.
+    // This flag is an updater-only optimization. A fresh install always syncs
+    // packages, and refresh mode keeps its legacy behavior unless told to skip.
     let sync_packages = !refresh_mode || !args.iter().any(|arg| arg == "--skip-package-sync");
-    let build_tools = !refresh_mode || !args.iter().any(|arg| arg == "--skip-tool-build");
 
     RunOptions {
         refresh_mode,
         sync_packages,
-        build_tools,
     }
 }
 
@@ -298,38 +295,31 @@ fn main() {
     }
 
     // 2. Re-compile Rust Apps (Ensures updates to your tools are applied)
-    if run_options.build_tools {
-        println!("\n{}", "🦀 Syncing Custom Rust Apps...".blue().bold());
-        // GUARANTEE Rust toolchain is loaded and set to stable (fixes GUI launcher bug)
-        let _ = Command::new("rustup")
-            .args(["default", "stable"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+    println!("\n{}", "🦀 Syncing Custom Rust Apps...".blue().bold());
+    // GUARANTEE Rust toolchain is loaded and set to stable (fixes GUI launcher bug)
+    let _ = Command::new("rustup")
+        .args(["default", "stable"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 
-        // Install the sidebar's packaged EDS dependency before compiling the app.
-        if let Err(e) = install_clepsydre_package(&live_sys, &home) {
-            eprintln!(
-                "   ❌ Failed to install the clepsydre dependency required by sidebar: {}",
-                e
-            );
-            std::process::exit(1);
-        }
-
-        if let Err(e) = remove_retired_tool_sources(&repo_root) {
-            eprintln!("   ❌ Failed to remove retired tool sources: {}", e);
-            std::process::exit(1);
-        }
-
-        if let Err(e) = build_custom_apps(&live_sys, &home, &repo_root) {
-            println!("   ⚠️  Failed to build custom Rust apps: {}", e);
-        };
-    } else {
-        println!(
-            "\n{}",
-            "🦀 Skipping Rust tool builds (sysScripts unchanged).".dimmed()
+    // Install the sidebar's packaged EDS dependency before compiling the app.
+    if let Err(e) = install_clepsydre_package(&live_sys, &home) {
+        eprintln!(
+            "   ❌ Failed to install the clepsydre dependency required by sidebar: {}",
+            e
         );
+        std::process::exit(1);
     }
+
+    if let Err(e) = remove_retired_tool_sources(&repo_root) {
+        eprintln!("   ❌ Failed to remove retired tool sources: {}", e);
+        std::process::exit(1);
+    }
+
+    if let Err(e) = build_custom_apps(&live_sys, &home, &repo_root) {
+        println!("   ⚠️  Failed to build custom Rust apps: {}", e);
+    };
 
     if let Err(e) = configure_tlp(&live_sys, &repo_root) {
         eprintln!("   ❌ Failed to configure TLP power management: {}", e);
@@ -614,13 +604,12 @@ mod tests {
     }
 
     #[test]
-    fn fresh_installs_always_sync_packages_and_build_tools() {
+    fn fresh_installs_always_sync_packages() {
         assert_eq!(
-            options(&["install-wizard", "--skip-package-sync", "--skip-tool-build"]),
+            options(&["install-wizard", "--skip-package-sync"]),
             RunOptions {
                 refresh_mode: false,
                 sync_packages: true,
-                build_tools: true,
             }
         );
     }
@@ -632,19 +621,6 @@ mod tests {
             RunOptions {
                 refresh_mode: true,
                 sync_packages: true,
-                build_tools: true,
-            }
-        );
-    }
-
-    #[test]
-    fn refresh_mode_can_skip_only_tool_builds() {
-        assert_eq!(
-            options(&["install-wizard", "--refresh-configs", "--skip-tool-build"]),
-            RunOptions {
-                refresh_mode: true,
-                sync_packages: true,
-                build_tools: false,
             }
         );
     }
@@ -656,24 +632,6 @@ mod tests {
             RunOptions {
                 refresh_mode: true,
                 sync_packages: false,
-                build_tools: true,
-            }
-        );
-    }
-
-    #[test]
-    fn refresh_mode_can_skip_packages_and_tools() {
-        assert_eq!(
-            options(&[
-                "install-wizard",
-                "--refresh-configs",
-                "--skip-package-sync",
-                "--skip-tool-build",
-            ]),
-            RunOptions {
-                refresh_mode: true,
-                sync_packages: false,
-                build_tools: false,
             }
         );
     }

@@ -270,45 +270,39 @@ EOF
             fi
         fi
 
-        # --- 4. APPLY ONLY CHANGED MANAGED STATE ---
+        # --- 4. REFRESH CONFIGS & CACHED TOOLS ---
         if [ $sys_exit -eq 0 ]; then
-            if [ $TOOLS_CHANGED -eq 1 ] || [ $PKGLIST_CHANGED -eq 1 ]; then
-                echo -e "\n\n🔄 Applying Changed Machine State..."
-                if [ $REPO_AVAILABLE -eq 1 ] && [ -d "$REPO_PATH/sysScripts/install-wizard" ]; then
-                    INSTALLER_BIN="$HOME/.cargo/bin/install-wizard"
-                    if [ $INSTALLER_CHANGED -eq 1 ] || [ ! -x "$INSTALLER_BIN" ]; then
-                        echo "   🏗️ Building updated installer..."
-                        cd "$REPO_PATH/sysScripts/install-wizard"
-                        if cargo build --release -q; then
-                            echo "  🌠 Updating installer binary..."
-                            cp target/release/install-wizard "$INSTALLER_BIN"
-                        else
-                            echo "❌ Installer build failed; skipping managed refresh."
-                            sys_exit=1
-                        fi
-                    fi
-
-                    if [ $sys_exit -eq 0 ] && [ -x "$INSTALLER_BIN" ]; then
-                        INSTALLER_ARGS=(--refresh-configs)
-                        if [ $TOOLS_CHANGED -eq 0 ]; then
-                            INSTALLER_ARGS+=(--skip-tool-build)
-                        fi
-                        if [ $PKGLIST_CHANGED -eq 0 ]; then
-                            INSTALLER_ARGS+=(--skip-package-sync)
-                        fi
-                        # The wizard elevates internally.
-                        REPO_ROOT="$REPO_PATH" "$INSTALLER_BIN" "${{INSTALLER_ARGS[@]}}"
-                    elif [ $sys_exit -eq 0 ]; then
-                        echo "⚠️ Installer binary not found. Skipping managed refresh."
-                        echo "Run 'cargo build --release' in sysScripts/install-wizard to fix."
+            echo -e "\n\n🔄 Refreshing Machine State..."
+            if [ $REPO_AVAILABLE -eq 1 ] && [ -d "$REPO_PATH/sysScripts/install-wizard" ]; then
+                INSTALLER_BIN="$HOME/.cargo/bin/install-wizard"
+                if [ $INSTALLER_CHANGED -eq 1 ] || [ ! -x "$INSTALLER_BIN" ]; then
+                    echo "   🏗️ Building updated installer..."
+                    cd "$REPO_PATH/sysScripts/install-wizard"
+                    if cargo build --release -q; then
+                        echo "  🌠 Updating installer binary..."
+                        cp target/release/install-wizard "$INSTALLER_BIN"
+                    else
+                        echo "❌ Installer build failed; skipping managed refresh."
                         sys_exit=1
                     fi
-                else
-                    echo "⚠️ Repo not found. Skipping managed refresh."
+                fi
+
+                if [ $sys_exit -eq 0 ] && [ -x "$INSTALLER_BIN" ]; then
+                    INSTALLER_ARGS=(--refresh-configs)
+                    if [ $PKGLIST_CHANGED -eq 0 ]; then
+                        INSTALLER_ARGS+=(--skip-package-sync)
+                    fi
+                    # The wizard elevates internally and uses Cargo's cache for
+                    # lightweight tool checks without discarding any artifacts.
+                    REPO_ROOT="$REPO_PATH" "$INSTALLER_BIN" "${{INSTALLER_ARGS[@]}}"
+                elif [ $sys_exit -eq 0 ]; then
+                    echo "⚠️ Installer binary not found. Skipping managed refresh."
+                    echo "Run 'cargo build --release' in sysScripts/install-wizard to fix."
                     sys_exit=1
                 fi
             else
-                echo -e "\n\n✔ No sysScripts or pkglist changes. Skipping installer and tool builds."
+                echo "⚠️ Repo not found. Skipping managed refresh."
+                sys_exit=1
             fi
         fi
 
@@ -352,13 +346,13 @@ EOF
 #[cfg(test)]
 mod tests {
     #[test]
-    fn update_script_preserves_personal_configs_and_uses_targeted_refreshes() {
+    fn update_script_preserves_personal_configs_and_keeps_cached_tool_checks() {
         let source = include_str!("main.rs");
 
         assert!(source.contains("git diff --quiet origin/main -- sysScripts"));
         assert!(!source.contains(&["git diff --quiet origin/main --", " .config"].concat()));
-        assert!(source.contains("--skip-tool-build"));
         assert!(source.contains("--skip-package-sync"));
+        assert!(!source.contains(&["--skip-", "tool-build"].concat()));
         assert!(!source.contains(&["cargo", "clean", "--manifest-path"].join(" ")));
     }
 }
