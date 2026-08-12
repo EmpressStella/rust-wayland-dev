@@ -70,6 +70,28 @@ const AUR_PACKAGES: &[&str] = &[
     "librewolf-bin",
 ];
 
+#[derive(Debug, PartialEq, Eq)]
+struct RunOptions {
+    refresh_mode: bool,
+    sync_packages: bool,
+    build_tools: bool,
+}
+
+fn parse_run_options(args: &[String]) -> RunOptions {
+    let refresh_mode = args.iter().any(|arg| arg == "--refresh-configs");
+
+    // These flags are updater-only optimizations. A fresh install always performs
+    // both steps, and refresh mode keeps its legacy behavior unless told to skip.
+    let sync_packages = !refresh_mode || !args.iter().any(|arg| arg == "--skip-package-sync");
+    let build_tools = !refresh_mode || !args.iter().any(|arg| arg == "--skip-tool-build");
+
+    RunOptions {
+        refresh_mode,
+        sync_packages,
+        build_tools,
+    }
+}
+
 // ---------- Main Execution ------_-------
 
 fn main() {
@@ -106,7 +128,8 @@ fn main() {
 
     // 0. Parse Arguments
     let args: Vec<String> = std::env::args().collect();
-    let refresh_mode = args.contains(&"--refresh-configs".to_string());
+    let run_options = parse_run_options(&args);
+    let refresh_mode = run_options.refresh_mode;
 
     if refresh_mode {
         println!("{}", "🔄 Running in CONFIG REFRESH MODE".magenta().bold());
@@ -234,65 +257,79 @@ fn main() {
     // ==========================================
 
     // 1. Sync Standard & AUR Packages
-    println!("\n{}", "📦 Syncing Standard Packages...".blue().bold());
-    let mut common_pkgs = match load_packages_from_file("pkglist.txt", &repo_root) {
-        Ok(pkgs) => pkgs,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            println!("   ⚠️  pkglist.txt not found. Skipping package installation.");
-            Vec::new()
-        }
-        Err(e) => {
-            eprintln!("   ❌ Failed to read pkglist.txt: {}", e);
-            std::process::exit(1);
-        }
-    };
+    if run_options.sync_packages {
+        println!("\n{}", "📦 Syncing Standard Packages...".blue().bold());
+        let mut common_pkgs = match load_packages_from_file("pkglist.txt", &repo_root) {
+            Ok(pkgs) => pkgs,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                println!("   ⚠️  pkglist.txt not found. Skipping package installation.");
+                Vec::new()
+            }
+            Err(e) => {
+                eprintln!("   ❌ Failed to read pkglist.txt: {}", e);
+                std::process::exit(1);
+            }
+        };
 
-    let ignored_pkgs = get_ignored_packages(&live_sys);
-    common_pkgs.retain(|pkg| !ignored_pkgs.contains(pkg));
+        let ignored_pkgs = get_ignored_packages(&live_sys);
+        common_pkgs.retain(|pkg| !ignored_pkgs.contains(pkg));
 
-    if common_pkgs.is_empty() {
-        println!("   ⚠️  No packages found in pkglist.txt.");
+        if common_pkgs.is_empty() {
+            println!("   ⚠️  No packages found in pkglist.txt.");
+        } else {
+            let pkg_refs: Vec<&str> = common_pkgs.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = install_pacman_packages(&live_sys, &pkg_refs) {
+                eprintln!("   ❌ Failed to install standard packages: {}", e);
+                std::process::exit(1);
+            };
+        }
+
+        if !AUR_PACKAGES.is_empty() {
+            println!("\n{}", "📦 Syncing AUR Packages...".blue().bold());
+            if let Err(e) = install_aur_packages(&live_sys, &home, AUR_PACKAGES) {
+                eprintln!("   ❌ Failed to install AUR packages: {}", e);
+            };
+        }
     } else {
-        let pkg_refs: Vec<&str> = common_pkgs.iter().map(|s| s.as_str()).collect();
-        if let Err(e) = install_pacman_packages(&live_sys, &pkg_refs) {
-            eprintln!("   ❌ Failed to install standard packages: {}", e);
-            std::process::exit(1);
-        };
-    }
-
-    if !AUR_PACKAGES.is_empty() {
-        println!("\n{}", "📦 Syncing AUR Packages...".blue().bold());
-        if let Err(e) = install_aur_packages(&live_sys, &home, AUR_PACKAGES) {
-            eprintln!("   ❌ Failed to install AUR packages: {}", e);
-        };
+        println!(
+            "\n{}",
+            "📦 Skipping package sync (pkglist unchanged).".dimmed()
+        );
     }
 
     // 2. Re-compile Rust Apps (Ensures updates to your tools are applied)
-    println!("\n{}", "🦀 Syncing Custom Rust Apps...".blue().bold());
-    // GUARANTEE Rust toolchain is loaded and set to stable (fixes GUI launcher bug)
-    let _ = Command::new("rustup")
-        .args(["default", "stable"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    if run_options.build_tools {
+        println!("\n{}", "🦀 Syncing Custom Rust Apps...".blue().bold());
+        // GUARANTEE Rust toolchain is loaded and set to stable (fixes GUI launcher bug)
+        let _ = Command::new("rustup")
+            .args(["default", "stable"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
 
-    // Install the sidebar's packaged EDS dependency before compiling the app.
-    if let Err(e) = install_clepsydre_package(&live_sys, &home) {
-        eprintln!(
-            "   ❌ Failed to install the clepsydre dependency required by sidebar: {}",
-            e
+        // Install the sidebar's packaged EDS dependency before compiling the app.
+        if let Err(e) = install_clepsydre_package(&live_sys, &home) {
+            eprintln!(
+                "   ❌ Failed to install the clepsydre dependency required by sidebar: {}",
+                e
+            );
+            std::process::exit(1);
+        }
+
+        if let Err(e) = remove_retired_tool_sources(&repo_root) {
+            eprintln!("   ❌ Failed to remove retired tool sources: {}", e);
+            std::process::exit(1);
+        }
+
+        if let Err(e) = build_custom_apps(&live_sys, &home, &repo_root) {
+            println!("   ⚠️  Failed to build custom Rust apps: {}", e);
+        };
+    } else {
+        println!(
+            "\n{}",
+            "🦀 Skipping Rust tool builds (sysScripts unchanged).".dimmed()
         );
-        std::process::exit(1);
     }
-
-    if let Err(e) = remove_retired_tool_sources(&repo_root) {
-        eprintln!("   ❌ Failed to remove retired tool sources: {}", e);
-        std::process::exit(1);
-    }
-
-    if let Err(e) = build_custom_apps(&live_sys, &home, &repo_root) {
-        println!("   ⚠️  Failed to build custom Rust apps: {}", e);
-    };
 
     if let Err(e) = configure_tlp(&live_sys, &repo_root) {
         eprintln!("   ❌ Failed to configure TLP power management: {}", e);
@@ -566,6 +603,80 @@ fn print_logo() {
 mod tests {
     use super::*;
     use crate::mock_env::MockEnv;
+
+    fn options(args: &[&str]) -> RunOptions {
+        parse_run_options(
+            &args
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    #[test]
+    fn fresh_installs_always_sync_packages_and_build_tools() {
+        assert_eq!(
+            options(&["install-wizard", "--skip-package-sync", "--skip-tool-build"]),
+            RunOptions {
+                refresh_mode: false,
+                sync_packages: true,
+                build_tools: true,
+            }
+        );
+    }
+
+    #[test]
+    fn refresh_mode_preserves_legacy_full_refresh_without_skip_flags() {
+        assert_eq!(
+            options(&["install-wizard", "--refresh-configs"]),
+            RunOptions {
+                refresh_mode: true,
+                sync_packages: true,
+                build_tools: true,
+            }
+        );
+    }
+
+    #[test]
+    fn refresh_mode_can_skip_only_tool_builds() {
+        assert_eq!(
+            options(&["install-wizard", "--refresh-configs", "--skip-tool-build"]),
+            RunOptions {
+                refresh_mode: true,
+                sync_packages: true,
+                build_tools: false,
+            }
+        );
+    }
+
+    #[test]
+    fn refresh_mode_can_skip_only_package_sync() {
+        assert_eq!(
+            options(&["install-wizard", "--refresh-configs", "--skip-package-sync",]),
+            RunOptions {
+                refresh_mode: true,
+                sync_packages: false,
+                build_tools: true,
+            }
+        );
+    }
+
+    #[test]
+    fn refresh_mode_can_skip_packages_and_tools() {
+        assert_eq!(
+            options(&[
+                "install-wizard",
+                "--refresh-configs",
+                "--skip-package-sync",
+                "--skip-tool-build",
+            ]),
+            RunOptions {
+                refresh_mode: true,
+                sync_packages: false,
+                build_tools: false,
+            }
+        );
+    }
 
     #[test]
     fn test_setup_battery_daemon() {

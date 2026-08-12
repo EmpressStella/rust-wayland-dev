@@ -212,34 +212,39 @@ EOF
                 echo "Fetching remote..."
                 git fetch origin main
 
-                # Track tool changes separately: only they require clearing Cargo output.
-                SCRIPTS_DIFF=0
-                TOOLS_DIFF=0
+                # Keep personal dotfiles out of this decision. Only managed tool,
+                # package-list, and helper-script changes are force-synced.
+                TOOLS_CHANGED=0
+                PKGLIST_CHANGED=0
+                SCRIPTS_CHANGED=0
+                INSTALLER_CHANGED=0
                 if ! git diff --quiet origin/main -- sysScripts; then
-                    SCRIPTS_DIFF=1
-                    TOOLS_DIFF=1
+                    TOOLS_CHANGED=1
                 fi
-                if ! git diff --quiet origin/main -- pkglist.txt; then SCRIPTS_DIFF=1; fi
-                if ! git diff --quiet origin/main -- scripts; then SCRIPTS_DIFF=1; fi
+                if ! git diff --quiet origin/main -- sysScripts/install-wizard; then
+                    INSTALLER_CHANGED=1
+                fi
+                if ! git diff --quiet origin/main -- pkglist.txt; then PKGLIST_CHANGED=1; fi
+                if ! git diff --quiet origin/main -- scripts; then SCRIPTS_CHANGED=1; fi
 
                 SYNC_OK=1
-                if [ $SCRIPTS_DIFF -eq 1 ]; then
-                    echo -e "\n✨ Updates detected in Tools or Package List!"
-                    echo "🧹 Force-syncing sysScripts & pkglist.txt..."
+                if [ $TOOLS_CHANGED -eq 1 ] || [ $PKGLIST_CHANGED -eq 1 ] || [ $SCRIPTS_CHANGED -eq 1 ]; then
+                    echo -e "\n✨ Updates detected in managed files!"
+                    echo "🧹 Force-syncing sysScripts, pkglist.txt, and scripts..."
                     if git checkout origin/main -- sysScripts pkglist.txt scripts; then
-                        echo -e "✅ Files synced. Wizard will compile changes."
+                        echo -e "✅ Managed files synced."
                     else
                         echo "❌ Repo sync failed; skipping the config refresh."
                         SYNC_OK=0
                         sys_exit=1
                     fi
                 else
-                    echo "✔ Rust tools and packages are up to date."
+                    echo "✔ Managed tools, packages, and scripts are up to date."
                 fi
 
                 if [ $SYNC_OK -eq 1 ]; then
-                    # Cargo cleans build output, but it cannot remove source files that a
-                    # previous version retired. Keep this list explicit and reviewable.
+                    # Cargo does not remove source files that a previous version retired.
+                    # Keep this migration list explicit and reviewable.
                     RETIRED_TOOL_SOURCES=(
                         "sysScripts/sidebar/build.rs"
                         "sysScripts/sidebar/src/calendar_query.c"
@@ -254,12 +259,10 @@ EOF
                         fi
                     done
 
-                    if [ $TOOLS_DIFF -eq 1 ] || [ $RETIRED_SOURCE_REMOVED -eq 1 ]; then
-                        echo "🧹 Clearing Cargo build output for updated tools..."
-                        find "$REPO_PATH/sysScripts" -mindepth 2 -maxdepth 2 -name Cargo.toml -print0 |
-                            while IFS= read -r -d '' manifest; do
-                                cargo clean --manifest-path "$manifest"
-                            done
+                    if [ $RETIRED_SOURCE_REMOVED -eq 1 ]; then
+                        # The next targeted tool build will rebuild only what this source
+                        # removal affects; do not discard shared Cargo artifacts.
+                        TOOLS_CHANGED=1
                     fi
                 fi
             else
@@ -267,30 +270,45 @@ EOF
             fi
         fi
 
-        # --- 4. REFRESH CONFIGS & PACKAGES ---
+        # --- 4. APPLY ONLY CHANGED MANAGED STATE ---
         if [ $sys_exit -eq 0 ]; then
-            echo -e "\n\n🔄 Applying Machine State..."
-              if [ $REPO_AVAILABLE -eq 1 ] && [ -d "$REPO_PATH/sysScripts/install-wizard" ]; then
-                 echo "   🏗️ Checking installer for updates..."
-                 cd "$REPO_PATH/sysScripts/install-wizard"
-                 cargo build --release -q
+            if [ $TOOLS_CHANGED -eq 1 ] || [ $PKGLIST_CHANGED -eq 1 ]; then
+                echo -e "\n\n🔄 Applying Changed Machine State..."
+                if [ $REPO_AVAILABLE -eq 1 ] && [ -d "$REPO_PATH/sysScripts/install-wizard" ]; then
+                    INSTALLER_BIN="$HOME/.cargo/bin/install-wizard"
+                    if [ $INSTALLER_CHANGED -eq 1 ] || [ ! -x "$INSTALLER_BIN" ]; then
+                        echo "   🏗️ Building updated installer..."
+                        cd "$REPO_PATH/sysScripts/install-wizard"
+                        if cargo build --release -q; then
+                            echo "  🌠 Updating installer binary..."
+                            cp target/release/install-wizard "$INSTALLER_BIN"
+                        else
+                            echo "❌ Installer build failed; skipping managed refresh."
+                            sys_exit=1
+                        fi
+                    fi
 
-                 if [ target/release/install-wizard -nt "$HOME/.cargo/bin/install-wizard" ]; then
-                    echo "  🌠 Updating installer binary..."
-                    cp target/release/install-wizard "$HOME/.cargo/bin/"
-                 fi
-
-                 INSTALLER_BIN="$HOME/.cargo/bin/install-wizard"
-
-                 if [ -f "$INSTALLER_BIN" ]; then
-                     # NOTE: Dropped 'sudo' here. Wizard elevates internally!
-                     REPO_ROOT="$REPO_PATH" "$INSTALLER_BIN" --refresh-configs
-                 else
-                     echo "⚠️ Installer binary not found. Skipping config refresh."
-                     echo "Run 'cargo build --release' in sysScripts/install-wizard to fix."
-                 fi
+                    if [ $sys_exit -eq 0 ] && [ -x "$INSTALLER_BIN" ]; then
+                        INSTALLER_ARGS=(--refresh-configs)
+                        if [ $TOOLS_CHANGED -eq 0 ]; then
+                            INSTALLER_ARGS+=(--skip-tool-build)
+                        fi
+                        if [ $PKGLIST_CHANGED -eq 0 ]; then
+                            INSTALLER_ARGS+=(--skip-package-sync)
+                        fi
+                        # The wizard elevates internally.
+                        REPO_ROOT="$REPO_PATH" "$INSTALLER_BIN" "${{INSTALLER_ARGS[@]}}"
+                    elif [ $sys_exit -eq 0 ]; then
+                        echo "⚠️ Installer binary not found. Skipping managed refresh."
+                        echo "Run 'cargo build --release' in sysScripts/install-wizard to fix."
+                        sys_exit=1
+                    fi
+                else
+                    echo "⚠️ Repo not found. Skipping managed refresh."
+                    sys_exit=1
+                fi
             else
-                 echo "⚠️ Repo not found. Skipping config refresh."
+                echo -e "\n\n✔ No sysScripts or pkglist changes. Skipping installer and tool builds."
             fi
         fi
 
@@ -329,4 +347,18 @@ EOF
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn update_script_preserves_personal_configs_and_uses_targeted_refreshes() {
+        let source = include_str!("main.rs");
+
+        assert!(source.contains("git diff --quiet origin/main -- sysScripts"));
+        assert!(!source.contains(&["git diff --quiet origin/main --", " .config"].concat()));
+        assert!(source.contains("--skip-tool-build"));
+        assert!(source.contains("--skip-package-sync"));
+        assert!(!source.contains(&["cargo", "clean", "--manifest-path"].join(" ")));
+    }
 }
