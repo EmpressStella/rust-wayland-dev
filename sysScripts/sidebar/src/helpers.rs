@@ -1,7 +1,7 @@
 //! Shared helper utilities for sidebar widgets and command execution.
 
 use async_channel::{Receiver, Sender, unbounded};
-use chrono::{DateTime, Datelike, Local, NaiveDate};
+use chrono::{DateTime, Datelike, Local, NaiveDate, Utc};
 use clepsydre_eds::Manager as EdsManager;
 use clepsydre_rebind::prelude::*;
 use clepsydre_rebind::{Event, Timeframe};
@@ -190,19 +190,33 @@ fn event_to_calendar_event(event: Event) -> Option<CalendarEvent> {
     let end_unix = tf.end_unix();
     let all_day = tf.is_all_day();
 
-    let start = DateTime::from_timestamp(start_unix, 0)?.with_timezone(&Local);
-    let end = DateTime::from_timestamp(end_unix, 0)?.with_timezone(&Local);
+    let start_date_reform: String;
+    let end_date_reform: String;
+    let display_time_reform: String;
+
+    /* Dummy timestamp at 00:00:00 UTC to prevent offseting with local time for all day events */
+    if all_day {
+        let start = DateTime::from_timestamp(start_unix, 0)?.with_timezone(&Utc);
+        let end = DateTime::from_timestamp(end_unix, 0)?.with_timezone(&Utc);
+
+        start_date_reform = start.format("%Y-%m-%d").to_string();
+        end_date_reform = end.format("%Y-%m-%d").to_string();
+        display_time_reform = "All day".to_string();
+    } else {
+        let start = DateTime::from_timestamp(start_unix, 0)?.with_timezone(&Local);
+        let end = DateTime::from_timestamp(end_unix, 0)?.with_timezone(&Local);
+
+        start_date_reform = start.format("%Y-%m-%d").to_string();
+        end_date_reform = end.format("%Y-%m-%d").to_string();
+        display_time_reform = start.format("%H:%M").to_string();
+    }
 
     Some(CalendarEvent {
         uid: event.uri().map(|s| s.to_string()).unwrap_or_default(),
         summary: event.name().map(|s| s.to_string()).unwrap_or_default(),
-        start_date: start.format("%Y-%m-%d").to_string(),
-        end_date: end.format("%Y-%m-%d").to_string(),
-        display_time: if all_day {
-            "All day".into()
-        } else {
-            start.format("%H:%M").to_string()
-        },
+        start_date: start_date_reform,
+        end_date: end_date_reform,
+        display_time: display_time_reform,
         duration_minutes: ((end_unix - start_unix) / 60).max(0),
         all_day,
         sort_key: start_unix,
