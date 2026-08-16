@@ -31,8 +31,8 @@ pub struct CalendarResponse {
 pub struct CalendarEvent {
     uid: String,
     summary: String,
-    start_date: String,
-    end_date: String,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
     display_time: String,
     duration_minutes: i64,
     all_day: bool,
@@ -195,18 +195,14 @@ fn event_to_calendar_event(event: Event) -> Option<CalendarEvent> {
         let start = DateTime::from_timestamp(start_unix, 0)?.with_timezone(&Utc);
         let end = DateTime::from_timestamp(end_unix, 0)?.with_timezone(&Utc);
 
-        (
-            start.format("%Y-%m-%d").to_string(),
-            end.format("%Y-%m-%d").to_string(),
-            "All day".to_string(),
-        )
+        (start.date_naive(), end.date_naive(), "All day".to_string())
     } else {
         let start = DateTime::from_timestamp(start_unix, 0)?.with_timezone(&Local);
         let end = DateTime::from_timestamp(end_unix, 0)?.with_timezone(&Local);
 
         (
-            start.format("%Y-%m-%d").to_string(),
-            end.format("%Y-%m-%d").to_string(),
+            start.date_naive(),
+            end.date_naive(),
             start.format("%H:%M").to_string(),
         )
     };
@@ -224,17 +220,10 @@ fn event_to_calendar_event(event: Event) -> Option<CalendarEvent> {
 }
 
 fn occurs_on(event: &CalendarEvent, target_date: NaiveDate) -> bool {
-    let Ok(start) = NaiveDate::parse_from_str(&event.start_date, "%Y-%m-%d") else {
-        return false;
-    };
-    let Ok(end) = NaiveDate::parse_from_str(&event.end_date, "%Y-%m-%d") else {
-        return false;
-    };
-
     if event.all_day {
-        start <= target_date && target_date < end
+        event.start_date <= target_date && target_date < event.end_date
     } else {
-        start <= target_date && target_date <= end
+        event.start_date <= target_date && target_date <= event.end_date
     }
 }
 
@@ -722,8 +711,8 @@ mod tests {
         CalendarEvent {
             uid: "uid-1".to_string(),
             summary: "Test".to_string(),
-            start_date: start_date.to_string(),
-            end_date: end_date.to_string(),
+            start_date: NaiveDate::parse_from_str(start_date, "%Y-%m-%d").unwrap(),
+            end_date: NaiveDate::parse_from_str(end_date, "%Y-%m-%d").unwrap(),
             display_time: "09:00".to_string(),
             duration_minutes: 30,
             all_day,
