@@ -440,7 +440,7 @@ pub fn build_calendar_grid_from_events(
             .build();
 
         btn.connect_clicked(move |_| {
-            let date_arg = format!("{}-{}-{}", year, month, day_num);
+            let date_arg = format!("{:4}-{:02}-{:02}", year, month, day_num);
             run_command("gnome-calendar", &["--date", date_arg.as_str()]);
         });
 
