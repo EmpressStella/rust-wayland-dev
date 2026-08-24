@@ -189,7 +189,7 @@ fn main() -> Result<()> {
 
     let json_str = fs::read_to_string(&cache_file)?;
     let mut wallpapers: Vec<Wallpaper> = serde_json::from_str(&json_str)?;
-    wallpapers.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    wallpapers.sort_by_key(|a| a.name.to_lowercase());
     // Build Rofi Menu with Icons
     // Rofi supports icons via the `\0icon\x1f` delimiter syntax.
     let rofi_items: Vec<String> = wallpapers

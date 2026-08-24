@@ -220,7 +220,7 @@ impl App {
             self.message_color = Color::Yellow;
         } else {
             self.message_color = Color::Green;
-            self.message = format!("Added {}", &new_symbol);
+            self.message = format!("Added {}", new_symbol);
 
             self.state.select(Some(self.stocks.len() - 1));
 

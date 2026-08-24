@@ -20,4 +20,4 @@ export MOZ_ENABLE_WAYLAND=1
 
 # Electron Wayland Hint
 export ELECTRON_OZONE_PLATFORM_HINT=auto
-export PATH="$HOME/.cargo/bin:$PATH"
+. "$HOME/.cargo/env"
