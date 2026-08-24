@@ -165,13 +165,6 @@ All the helper scripts in this repo have been rewritten in Rust for maximum perf
   <img src="screenshots/sidebar.png" width="60%" alt="Power Menu formatting"/>
   </p>
 
-- **`cal-tui`**: A calendar app that runs in your terminal. It allows you to add appointments to your calendar.
-
-<p align="center">
-  <img src="screenshots/CalTuiDay.png" width="45%" alt="Calendar TUI"/>
-  <img src="screenshots/CalTuiWeek.png" width="45%" alt="Calendar TUI 2"/>
-  </p>
-
 - **`rfkill-manager`**:
   - `--status`: The airplane icon in your SwayNC, showing if "Airplane Mode" is on or off.
   - `--toggle`: The `on-click` action (in your `swaync` panel or on a keybind) that toggles all wireless (Wi-Fi & Bluetooth) on or off.
