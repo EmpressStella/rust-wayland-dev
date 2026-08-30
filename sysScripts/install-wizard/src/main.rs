@@ -70,7 +70,6 @@ const AUR_PACKAGES: &[&str] = &[
     "pinta",
     "ttf-victor-mono",
     "pear-desktop-bin",
-    "librewolf-bin",
 ];
 
 #[derive(Debug, PartialEq, Eq)]
