@@ -258,7 +258,8 @@ exec sway
 }
 
 /// Applies specific fixes for NVIDIA on Wayland.
-/// 1. Sets kernel parameters (`nvidia_drm.modeset=1`).
+/// 1. Sets the kernel parameter (`nvidia-drm.modeset=1`) when kernel-install
+///    manages `/etc/kernel/cmdline`.
 /// 2. Creates modprobe rules to fix suspend/resume.
 /// 3. Rebuilds initramfs via `mkinitcpio`.
 ///
@@ -306,6 +307,7 @@ pub fn apply_nvidia_configs(
     // We only enforce this for non-turing, though it doesn't hurt turing.
     if !is_turing {
         requires_rebuild |= ensure_nvidia_modules_in_initcpio(sys)?;
+        requires_rebuild |= ensure_nvidia_drm_modeset_in_kernel_cmdline(sys)?;
     }
     create_sway_hybrid_script(sys)?;
     println!("    🏗️  Rebuilding Initramfs...");
@@ -315,6 +317,39 @@ pub fn apply_nvidia_configs(
         println!("    ✅ No changes to initramfs configuration. Skipping rebuild.");
     }
     Ok(())
+}
+
+/// Adds the NVIDIA DRM modeset flag to kernel-install's managed command line.
+///
+/// Some installations use GRUB instead and do not have `/etc/kernel/cmdline`;
+/// leave those boot configurations untouched. The modprobe setting above still
+/// supplies modeset for them.
+pub fn ensure_nvidia_drm_modeset_in_kernel_cmdline(
+    sys: &impl CmdExecutor,
+) -> Result<bool, std::io::Error> {
+    const CMDLINE_PATH: &str = "/etc/kernel/cmdline";
+    const MODESET_FLAG: &str = "nvidia-drm.modeset=1";
+
+    let path = Path::new(CMDLINE_PATH);
+    if !sys.path_exists(path) {
+        println!("    ℹ️  No /etc/kernel/cmdline; leaving bootloader command line unchanged.");
+        return Ok(false);
+    }
+
+    println!("    🔧 Checking kernel command line for NVIDIA DRM modeset...");
+    let content = sys.read_file_to_string(path)?;
+    if content
+        .split_whitespace()
+        .any(|argument| argument == MODESET_FLAG || argument == "nvidia_drm.modeset=1")
+    {
+        return Ok(false);
+    }
+
+    let updated = match content.trim() {
+        "" => format!("{MODESET_FLAG}\n"),
+        cmdline => format!("{cmdline} {MODESET_FLAG}\n"),
+    };
+    sys.install_string_to_root_file(path, &updated, "644")
 }
 
 /// Helper: Safely adds nvidia modules to mkinitcpio.conf if missing.
@@ -551,6 +586,32 @@ mod tests {
         );
         let modified = ensure_nvidia_modules_in_initcpio(&env).expect("initcpio update failed");
         assert!(!modified);
+        assert!(env.cmd_log.borrow().is_empty());
+    }
+
+    #[test]
+    fn test_kernel_cmdline_adds_nvidia_drm_modeset_once() {
+        let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
+            "/etc/kernel/cmdline".to_string(),
+            "root=UUID=example rw quiet\n".to_string(),
+        );
+
+        assert!(ensure_nvidia_drm_modeset_in_kernel_cmdline(&env).unwrap());
+        let updated = env
+            .mock_files
+            .borrow()
+            .get("/etc/kernel/cmdline")
+            .unwrap()
+            .clone();
+        assert_eq!(updated, "root=UUID=example rw quiet nvidia-drm.modeset=1\n");
+        assert!(!ensure_nvidia_drm_modeset_in_kernel_cmdline(&env).unwrap());
+    }
+
+    #[test]
+    fn test_kernel_cmdline_is_unchanged_when_not_managed() {
+        let env = MockEnv::default();
+        assert!(!ensure_nvidia_drm_modeset_in_kernel_cmdline(&env).unwrap());
         assert!(env.cmd_log.borrow().is_empty());
     }
 

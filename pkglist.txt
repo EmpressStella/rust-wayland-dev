@@ -95,6 +95,7 @@ bat
 btop
 fastfetch
 neovim
+librewolf
 networkmanager
 network-manager-applet
 discord

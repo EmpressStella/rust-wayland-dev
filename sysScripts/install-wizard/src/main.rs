@@ -35,7 +35,7 @@ use crate::helpers::{
     repair_repo_symlink_targets, resolve_repo_root, write_repo_root,
 };
 use crate::live_env::LiveEnv;
-use crate::session::{configure_system, configure_tlp, enforce_session_order};
+use crate::session::{configure_dns, configure_system, configure_tlp, enforce_session_order};
 use crate::traits::CmdExecutor;
 use crate::update::{
     get_ignored_packages, install_aur_packages, install_clepsydre_package, install_pacman_packages,
@@ -49,7 +49,10 @@ use crate::user::{
 
 // Hardware Specific: NVIDIA
 const NVIDIA_PACKAGES: &[&str] = &[
-    "nvidia-dkms",
+    // New NVIDIA GPUs, including the RTX generation used in current Dell Pro
+    // Max systems, require the open kernel module package.
+    "nvidia-open",
+    "nvidia-utils",
     "nvidia-prime",
     "nvidia-settings",
     "libva-nvidia-driver",
@@ -67,7 +70,6 @@ const AUR_PACKAGES: &[&str] = &[
     "pinta",
     "ttf-victor-mono",
     "pear-desktop-bin",
-    "librewolf-bin",
 ];
 
 #[derive(Debug, PartialEq, Eq)]
@@ -292,6 +294,12 @@ fn main() {
             "\n{}",
             "📦 Skipping package sync (pkglist unchanged).".dimmed()
         );
+    }
+
+    println!("\n{}", "🌐 Configuring DNS proxy...".blue().bold());
+    if let Err(e) = configure_dns(&live_sys) {
+        eprintln!("   ❌ Failed to configure dnscrypt-proxy: {}", e);
+        std::process::exit(1);
     }
 
     // 2. Re-compile Rust Apps (Ensures updates to your tools are applied)

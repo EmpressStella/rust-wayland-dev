@@ -88,10 +88,10 @@ Pin packages in `/etc/pacman.conf` (`[options]` section):
 IgnorePkg = nvidia-dkms nvidia-utils lib32-nvidia-utils nvidia-settings linux linux-headers linux-lts linux-lts-headers
 ```
 
-If your NVIDIA card is newer (Ampere/Ada), install standard NVIDIA packages:
+If your NVIDIA card is newer (Ampere/Ada or later), install the NVIDIA open kernel module packages:
 
 ```bash
-sudo pacman -S --needed --noconfirm nvidia-dkms nvidia-prime nvidia-settings libva-nvidia-driver
+sudo pacman -S --needed --noconfirm nvidia-open nvidia-utils nvidia-prime nvidia-settings libva-nvidia-driver
 ```
 
 ### AMD
@@ -128,15 +128,15 @@ sudo pacman -S --needed --noconfirm \
   base-devel git go rustup openssl pkgconf glibc wget curl jq \
   man-db man-pages unzip tree pciutils pacman-contrib bolt upower tlp bluez \
   bluez-utils blueman brightnessctl udiskie fwupd util-linux intel-media-driver libva-utils vulkan-intel sway \
-  niri gnome hyprlock swayidle hypridle xdg-user-dirs-gtk greetd greetd-tuigreet xwayland-satellite qt5-wayland \
-  qt6-wayland polkit-gnome geoclue xdg-desktop-portal-gnome xdg-desktop-portal-wlr xdg-desktop-portal-gtk wl-clipboard cliphist pipewire pipewire-pulse \
-  pipewire-alsa pipewire-jack pavucontrol sof-firmware playerctl mpv-mpris thunar thunar-volman tumbler gvfs \
-  gvfs-mtp gvfs-smb gvfs-gphoto2 file-roller gnome-disk-utility ufw timeshift seahorse gnome-keyring waybar \
-  wofi rofi awww swaybg grim slurp mako papirus-icon-theme gnome-themes-extra adwaita-icon-theme \
-  ttf-jetbrains-mono-nerd ttf-fira-code ttf-jetbrains-mono noto-fonts noto-fonts-emoji otf-font-awesome zsh starship ghostty tmux \
-  fzf ripgrep bat btop fastfetch neovim networkmanager network-manager-applet discord tigervnc \
-  mpv gparted simple-scan gnome-calculator cups system-config-printer cups-pdf zsh-autosuggestions zsh-syntax-highlighting dnscrypt-proxy \
-  wireplumber
+  niri gnome hyprlock swayidle hypridle xdg-user-dirs-gtk xdg-utils greetd greetd-tuigreet xwayland-satellite \
+  qt5-wayland qt6-wayland polkit-gnome geoclue xdg-desktop-portal-gnome xdg-desktop-portal-wlr xdg-desktop-portal-gtk wl-clipboard cliphist pipewire \
+  pipewire-pulse pipewire-alsa pipewire-jack pavucontrol sof-firmware playerctl mpv-mpris thunar thunar-volman tumbler \
+  gvfs gvfs-mtp gvfs-smb gvfs-gphoto2 file-roller gnome-disk-utility ufw timeshift seahorse gnome-keyring \
+  waybar wofi rofi awww swaybg grim slurp mako papirus-icon-theme gnome-themes-extra \
+  adwaita-icon-theme ttf-jetbrains-mono-nerd ttf-fira-code ttf-jetbrains-mono noto-fonts noto-fonts-emoji otf-font-awesome zsh starship ghostty \
+  tmux fzf ripgrep bat btop fastfetch neovim librewolf networkmanager network-manager-applet \
+  discord tigervnc mpv gparted simple-scan gnome-calculator cups system-config-printer cups-pdf zsh-autosuggestions \
+  zsh-syntax-highlighting dnscrypt-proxy wireplumber
 ```
 <!-- PKGLIST:END -->
 
@@ -162,7 +162,7 @@ Install current AUR set:
 ```bash
 yay -S --needed --noconfirm \
   zoom slack-desktop ledger-live-bin visual-studio-code-bin pinta \
-  ttf-victor-mono pear-desktop-bin librewolf-bin
+  ttf-victor-mono pear-desktop-bin
 ```
 
 ## 5. Build and Sync Rust Apps to ~/.cargo/bin
