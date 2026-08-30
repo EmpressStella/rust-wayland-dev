@@ -1,5 +1,6 @@
 use crate::CmdExecutor;
 use std::path::Path;
+use toml_edit::{DocumentMut, Item};
 
 /// Configures essential system services and settings, including mkinitcpio sanitation, enabling
 /// geoclue/bluetooth/bolt, enabling Pacman cache cleanup, and
@@ -10,7 +11,6 @@ pub fn configure_system(sys: &impl CmdExecutor, home: &Path) -> Result<(), std::
     sys.run_cmd("sudo", &["systemctl", "enable", "geoclue.service"])?;
     sys.run_cmd("sudo", &["systemctl", "enable", "bluetooth.service"])?;
     sys.run_cmd("sudo", &["systemctl", "enable", "bolt.service"])?;
-    configure_dns(sys)?;
     // Prevent Pacman from eating the entire hard drive over time
     println!("   🧹 Enabling automated Pacman cache cleanup...");
     sys.run_cmd("sudo", &["systemctl", "enable", "--now", "paccache.timer"])?;
@@ -65,8 +65,11 @@ fn sanitize_mkinitcpio(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-///Configures dnscrypt-proxy to use Cloudflare's DNS servers for enhanced privacy and security.
-fn configure_dns(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
+/// Configures dnscrypt-proxy to use Cloudflare's DNS servers for enhanced privacy and security.
+///
+/// This is intentionally callable outside fresh-install setup so existing systems receive
+/// configuration repairs during both ordinary updates and config refreshes.
+pub fn configure_dns(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     // --- DNS Crypt Proxy CONFIGURATION ---
     println!("   🔧 Configuring dnscrypt-proxy (DNS Proxy)...");
 
@@ -75,37 +78,16 @@ fn configure_dns(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
         "sudo",
         &["pacman", "-S", "--needed", "--noconfirm", "dnscrypt-proxy"],
     )?;
-    // 2. Configure TOML to use Cloudflare
+    // 2. Configure TOML to use Cloudflare.
+    //
+    // `server_names` and `listen_addresses` are top-level settings. Editing lines
+    // by prefix can accidentally place either setting in `[static]`, making the
+    // dnscrypt configuration invalid. toml_edit preserves the rest of Arch's
+    // configuration while addressing these keys in their proper scopes.
     let dns_conf = Path::new("/etc/dnscrypt-proxy/dnscrypt-proxy.toml");
     let content = sys.read_file_to_string(dns_conf)?;
-    let mut found_names = Vec::new();
-    let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
-    for line in &mut lines {
-        // FIX: Only trim whitespace. Leave the '#' intact so we ignore commented examples.
-        let normalized = line.trim_start();
-
-        if normalized.starts_with("server_names =") {
-            found_names.push("server_names".to_string());
-            if line == "server_names = ['cloudflare']" {
-                continue; // Already correct
-            }
-            *line = "server_names = ['cloudflare']".to_string();
-        } else if normalized.starts_with("listen_addresses =") {
-            found_names.push("listen_addresses".to_string());
-            if line == "listen_addresses = ['127.0.0.1:53', '[::1]:53']" {
-                continue; // Already correct
-            }
-            *line = "listen_addresses = ['127.0.0.1:53', '[::1]:53']".to_string();
-        }
-    }
-    if !found_names.contains(&"server_names".to_string()) {
-        lines.push("server_names = ['cloudflare']".to_string());
-    }
-    if !found_names.contains(&"listen_addresses".to_string()) {
-        lines.push("listen_addresses = ['127.0.0.1:53', '[::1]:53']".to_string());
-    }
-    let new_content = lines.join("\n") + "\n";
-    sys.install_string_to_root_file(dns_conf, new_content.as_str(), "644")?;
+    let new_content = update_dnscrypt_config(&content)?;
+    sys.install_string_to_root_file(dns_conf, &new_content, "644")?;
     // 3. Enable the service
     sys.run_cmd("sudo", &["systemctl", "enable", "--now", "dnscrypt-proxy"])?;
 
@@ -120,6 +102,41 @@ fn configure_dns(sys: &impl CmdExecutor) -> Result<(), std::io::Error> {
     );
     sys.run_cmd("sudo", &["systemctl", "daemon-reload"])?;
     Ok(())
+}
+
+fn update_dnscrypt_config(content: &str) -> Result<String, std::io::Error> {
+    let mut document = content
+        .parse::<DocumentMut>()
+        .map_err(|error| std::io::Error::other(format!("Invalid dnscrypt-proxy TOML: {error}")))?;
+
+    // Repair configurations produced by the previous installer implementation.
+    // These settings are not valid inside the `[static]` table.
+    if let Some(static_table) = document.get_mut("static").and_then(Item::as_table_mut) {
+        static_table.remove("server_names");
+        static_table.remove("listen_addresses");
+    }
+
+    let server_names = "['cloudflare']"
+        .parse::<Item>()
+        .map_err(|error| std::io::Error::other(format!("Invalid server_names value: {error}")))?;
+    let listen_addresses = "['127.0.0.1:53', '[::1]:53']"
+        .parse::<Item>()
+        .map_err(|error| {
+            std::io::Error::other(format!("Invalid listen_addresses value: {error}"))
+        })?;
+
+    let root = document.as_table_mut();
+    root.insert("server_names", server_names);
+    root.insert("listen_addresses", listen_addresses);
+    let updated = document.to_string();
+
+    // toml_edit normalizes insignificant leading whitespace when parsing. Avoid
+    // rewriting an already-correct system configuration just for that.
+    if updated.trim() == content.trim() {
+        Ok(content.to_string())
+    } else {
+        Ok(updated)
+    }
 }
 
 ///Configures the user's shell to Zsh and sets up Tmux Plugin Manager for enhanced terminal
@@ -372,7 +389,7 @@ mod tests {
         let env = MockEnv::default();
         env.mock_files.borrow_mut().insert(
             "/etc/dnscrypt-proxy/dnscrypt-proxy.toml".to_string(),
-            "\nserver_names = cloudflare\nlisten_addresses = [127.0.0.1:53]\n".to_string(),
+            "\nserver_names = ['quad9-dnscrypt-ip4-filter-pri']\nlisten_addresses = ['127.0.0.1:5353']\n".to_string(),
         );
         let result = configure_dns(&env);
         let log = env.cmd_log.borrow();
@@ -525,6 +542,46 @@ mod tests {
         assert_eq!(
             updated_file,
             "\nserver_names = ['cloudflare']\nlisten_addresses = ['127.0.0.1:53', '[::1]:53']\n"
+        );
+    }
+
+    #[test]
+    fn test_dns_config_repairs_invalid_static_entries() {
+        let env = MockEnv::default();
+        env.mock_files.borrow_mut().insert(
+            "/etc/dnscrypt-proxy/dnscrypt-proxy.toml".to_string(),
+            r#"# server_names = ['scaleway-fr', 'google']
+listen_addresses = ['127.0.0.1:53', '[::1]:53']
+
+[static]
+server_names = ['cloudflare']
+"#
+            .to_string(),
+        );
+
+        configure_dns(&env).expect("DNS configuration should repair old installer output");
+        let updated = env
+            .mock_files
+            .borrow()
+            .get("/etc/dnscrypt-proxy/dnscrypt-proxy.toml")
+            .unwrap()
+            .clone();
+        let document = updated
+            .parse::<DocumentMut>()
+            .expect("repaired configuration must be valid TOML");
+
+        assert_eq!(
+            document["server_names"]
+                .as_value()
+                .unwrap()
+                .to_string()
+                .trim(),
+            "['cloudflare']"
+        );
+        assert!(!updated.contains("[static]\nserver_names"));
+        assert!(
+            updated.find("\nserver_names = ['cloudflare']").unwrap()
+                < updated.find("[static]").unwrap()
         );
     }
 
@@ -916,7 +973,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             updated_file,
-            "\nserver_names = ['cloudflare']\nlisten_addresses = ['127.0.0.1:53', '[::1]:53']\n"
+            "server_names = ['cloudflare']\nlisten_addresses = ['127.0.0.1:53', '[::1]:53']\n"
         );
     }
 
