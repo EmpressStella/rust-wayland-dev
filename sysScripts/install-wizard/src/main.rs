@@ -49,7 +49,10 @@ use crate::user::{
 
 // Hardware Specific: NVIDIA
 const NVIDIA_PACKAGES: &[&str] = &[
-    "nvidia-dkms",
+    // New NVIDIA GPUs, including the RTX generation used in current Dell Pro
+    // Max systems, require the open kernel module package.
+    "nvidia-open",
+    "nvidia-utils",
     "nvidia-prime",
     "nvidia-settings",
     "libva-nvidia-driver",

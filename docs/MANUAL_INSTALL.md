@@ -88,10 +88,10 @@ Pin packages in `/etc/pacman.conf` (`[options]` section):
 IgnorePkg = nvidia-dkms nvidia-utils lib32-nvidia-utils nvidia-settings linux linux-headers linux-lts linux-lts-headers
 ```
 
-If your NVIDIA card is newer (Ampere/Ada), install standard NVIDIA packages:
+If your NVIDIA card is newer (Ampere/Ada or later), install the NVIDIA open kernel module packages:
 
 ```bash
-sudo pacman -S --needed --noconfirm nvidia-dkms nvidia-prime nvidia-settings libva-nvidia-driver
+sudo pacman -S --needed --noconfirm nvidia-open nvidia-utils nvidia-prime nvidia-settings libva-nvidia-driver
 ```
 
 ### AMD
