@@ -29,7 +29,10 @@ mod traits;
 mod update;
 mod user;
 
-use crate::graphics::{GpuVendor, NvidiaArch, apply_nvidia_configs, detect_gpu, setup_turing_gpu};
+use crate::graphics::{
+    GpuVendor, NvidiaArch, apply_nvidia_configs, configure_rhit_dell_pro_max_niri, detect_gpu,
+    setup_turing_gpu,
+};
 use crate::helpers::{
     load_packages_from_file, migrate_legacy_users, read_repo_root_from_config,
     repair_repo_symlink_targets, resolve_repo_root, write_repo_root,
@@ -202,9 +205,20 @@ fn main() {
                     }
                 }
                 GpuVendor::Nvidia(NvidiaArch::Modern) => {
-                    println!("   👉 Modern NVIDIA Detected (RTX 30xx/40xx).");
+                    println!("   👉 Modern NVIDIA Detected (RTX 30xx/40xx/Blackwell).");
                     if let Err(e) = install_pacman_packages(&live_sys, NVIDIA_PACKAGES) {
                         eprintln!("   ❌ Failed to install NVIDIA drivers: {}", e);
+                        std::process::exit(1);
+                    }
+                    // The GUI checkpoint below exits before the normal hardware
+                    // enforcement stage. Apply the boot-critical NVIDIA setup now
+                    // so the first installer pass is complete before rebooting.
+                    if let Err(e) = apply_nvidia_configs(&NvidiaArch::Modern, &live_sys) {
+                        eprintln!("   ❌ Failed to configure NVIDIA power management: {}", e);
+                        std::process::exit(1);
+                    }
+                    if let Err(e) = configure_rhit_dell_pro_max_niri(&live_sys) {
+                        eprintln!("   ❌ Failed to configure Niri GPU selection: {}", e);
                         std::process::exit(1);
                     }
                 }
@@ -341,6 +355,23 @@ fn main() {
                 .yellow()
                 .bold()
         );
+
+        // Existing installations normally skip system configuration. NVIDIA
+        // power-management repairs are safe and needed to migrate older runs
+        // that completed the driver checkpoint without reaching that stage.
+        match configure_detected_nvidia(&live_sys) {
+            Ok(true) => {
+                if let Err(e) = enforce_session_order(&live_sys, true, &repo_root) {
+                    eprintln!("   ❌ Failed to refresh NVIDIA session integration: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("   ❌ Failed to configure NVIDIA hardware: {}", e);
+                std::process::exit(1);
+            }
+        }
     } else {
         println!(
             "\n{}",
@@ -351,23 +382,10 @@ fn main() {
         }
 
         // 3. Hardware Enforcement
-        let current_gpu = detect_gpu(&live_sys);
-
-        let is_nvidia = if let GpuVendor::Nvidia(arch) = current_gpu {
-            if arch == NvidiaArch::Turing
-                && let Err(e) = setup_turing_gpu(&live_sys)
-            {
-                eprintln!("   ❌ Failed to set up Turing NVIDIA drivers: {}", e);
-                std::process::exit(1);
-            }
-            if let Err(e) = apply_nvidia_configs(&arch, &live_sys) {
-                eprintln!("   ❌ Failed to apply NVIDIA configurations: {}", e);
-                std::process::exit(1);
-            }
-            true
-        } else {
-            false
-        };
+        let is_nvidia = configure_detected_nvidia(&live_sys).unwrap_or_else(|e| {
+            eprintln!("   ❌ Failed to configure NVIDIA hardware: {}", e);
+            std::process::exit(1);
+        });
 
         if let Err(e) = enforce_session_order(&live_sys, is_nvidia, &repo_root) {
             eprintln!("   ❌ Failed to enforce session order: {}", e);
@@ -453,6 +471,26 @@ fn main() {
                 .bold()
         );
     }
+}
+
+/// Applies the NVIDIA runtime configuration whenever NVIDIA hardware is present.
+/// Kept separate from the broader system setup so update-only runs can repair
+/// the driver checkpoint safely.
+fn configure_detected_nvidia(sys: &impl CmdExecutor) -> Result<bool, std::io::Error> {
+    let GpuVendor::Nvidia(arch) = detect_gpu(sys) else {
+        return Ok(false);
+    };
+
+    if arch == NvidiaArch::Turing {
+        setup_turing_gpu(sys)?;
+    } else {
+        // Update runs also repair systems where older GPU detection skipped an
+        // NVIDIA 3D controller and therefore never installed its driver.
+        install_pacman_packages(sys, NVIDIA_PACKAGES)?;
+    }
+    apply_nvidia_configs(&arch, sys)?;
+    configure_rhit_dell_pro_max_niri(sys)?;
+    Ok(true)
 }
 
 // Installs the battery life warning and exectes systemctl poweroff to protect battery
