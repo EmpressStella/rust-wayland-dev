@@ -9,6 +9,13 @@ const TURING_IDS: &[&str] = &[
     "0x2191", "0x21d1", // GTX 1650 Mobile variants..."0x1e02", "0x1e04", "0x1e07", "0x1e30",
 ];
 
+// Rose-Hulman's Dell Pro Max 16 fleet: RTX PRO 1000 Blackwell paired with the
+// Radeon 840M / 860M iGPU. This is deliberately a pair match, rather than a
+// broad "all hybrid laptops" policy: Niri's automatic renderer choice is
+// already correct on many other NVIDIA laptops.
+const RHIT_DELL_NVIDIA_DEVICE: &str = "0x2db8";
+const RHIT_DELL_AMD_DEVICE: &str = "0x1114";
+
 // --- Enums for Hardware Detection ---
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NvidiaArch {
@@ -24,7 +31,7 @@ pub enum GpuVendor {
     Nvidia(NvidiaArch),
 }
 
-/// Parses `lspci` output to identify GPU vendor IDs.
+/// Parses PCI sysfs entries to identify GPU vendor IDs.
 /// 10de = NVIDIA, 1002 = AMD, 8086 = Intel.
 pub fn detect_gpu(sys: &impl CmdExecutor) -> GpuVendor {
     let Ok(entries) = sys.list_dir_file_names(Path::new("/sys/bus/pci/devices")) else {
@@ -44,8 +51,8 @@ pub fn detect_gpu(sys: &impl CmdExecutor) -> GpuVendor {
         let Ok(device_hex) = sys.read_file_to_string(&path.join("device")) else {
             continue;
         };
-        if class_hex.trim() == "0x030000" || class_hex.trim() == "0x038000" {
-            // VGA Controller
+        if matches!(class_hex.trim(), "0x030000" | "0x030200" | "0x038000") {
+            // VGA controller, 3D controller, or display controller.
             match vendor_hex.trim() {
                 "0x10de" => {
                     let dev = device_hex.trim();
@@ -66,6 +73,55 @@ pub fn detect_gpu(sys: &impl CmdExecutor) -> GpuVendor {
         }
     }
     gpus.into_iter().max().unwrap_or(GpuVendor::Unknown) // If multiple GPUs, we prioritize NVIDIA > AMD > Intel
+}
+
+/// Returns the stable iGPU render-node path for the known Dell Pro Max 16
+/// hybrid graphics layout. Returning a PCI by-path symlink, rather than a
+/// renderD number, keeps the setting valid when DRM node numbering changes.
+///
+/// This intentionally does not apply to merely any NVIDIA + AMD system. It is
+/// a narrowly-scoped workaround for this fleet while Niri selects the NVIDIA
+/// card as its default renderer on these machines.
+pub fn rhit_dell_pro_max_niri_render_device(sys: &impl CmdExecutor) -> Option<String> {
+    let entries = sys
+        .list_dir_file_names(Path::new("/sys/bus/pci/devices"))
+        .ok()?;
+    let base_dir = Path::new("/sys/bus/pci/devices");
+    let mut has_rtx_pro_1000 = false;
+    let mut amd_igpu_bdf = None;
+
+    for entry in entries {
+        let path = base_dir.join(&entry);
+        let vendor = sys.read_file_to_string(&path.join("vendor")).ok()?;
+        let device = sys.read_file_to_string(&path.join("device")).ok()?;
+        match (vendor.trim(), device.trim()) {
+            ("0x10de", RHIT_DELL_NVIDIA_DEVICE) => has_rtx_pro_1000 = true,
+            ("0x1002", RHIT_DELL_AMD_DEVICE) => amd_igpu_bdf = Some(entry),
+            _ => {}
+        }
+    }
+
+    has_rtx_pro_1000.then(|| {
+        let bdf = amd_igpu_bdf?;
+        Some(format!("/dev/dri/by-path/pci-{}-render", bdf))
+    })?
+}
+
+/// Writes the opt-in marker consumed by the Niri session launcher. The marker
+/// contains only the iGPU's stable render-node path; it does not disable or
+/// otherwise restrict the NVIDIA GPU for CUDA or external displays.
+pub fn configure_rhit_dell_pro_max_niri(sys: &impl CmdExecutor) -> Result<bool, std::io::Error> {
+    let Some(render_device) = rhit_dell_pro_max_niri_render_device(sys) else {
+        return Ok(false);
+    };
+
+    println!("    🔧 Applying Dell Pro Max 16 Niri iGPU renderer workaround...");
+    sys.create_root_dir_all(Path::new("/etc/genoa"))?;
+    sys.install_string_to_root_file(
+        Path::new("/etc/genoa/niri-render-drm-device"),
+        &(render_device + "\n"),
+        "644",
+    )
 }
 
 /// Scans /sys/class/drm to find the integrated GPU (Intel or AMD).
@@ -451,6 +507,12 @@ mod tests {
                 "0x2684",
                 GpuVendor::Nvidia(NvidiaArch::Modern),
             ),
+            (
+                "0x030200",
+                "0x10de",
+                "0x2db8",
+                GpuVendor::Nvidia(NvidiaArch::Modern),
+            ),
             ("0x020000", "0x10de", "0x2204", GpuVendor::Unknown),
             ("0x030000", "0x1234", "0x5678", GpuVendor::Unknown),
         ];
@@ -470,6 +532,47 @@ mod tests {
         seed_pci_device(&env, "0000:01:00.0", "0x030000", "0x10de", "0x2204");
 
         assert_eq!(detect_gpu(&env), GpuVendor::Nvidia(NvidiaArch::Modern));
+    }
+
+    #[test]
+    fn test_rhit_dell_pro_max_niri_render_device() {
+        let env = MockEnv::default();
+        seed_pci_device(&env, "0000:c6:00.0", "0x030200", "0x10de", "0x2db8");
+        seed_pci_device(&env, "0000:c7:00.0", "0x038000", "0x1002", "0x1114");
+
+        assert_eq!(
+            rhit_dell_pro_max_niri_render_device(&env),
+            Some("/dev/dri/by-path/pci-0000:c7:00.0-render".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rhit_dell_pro_max_niri_workaround_requires_both_gpus() {
+        let env = MockEnv::default();
+        seed_pci_device(&env, "0000:c7:00.0", "0x038000", "0x1002", "0x1114");
+
+        assert_eq!(rhit_dell_pro_max_niri_render_device(&env), None);
+        assert!(!configure_rhit_dell_pro_max_niri(&env).expect("configuration should succeed"));
+        assert!(
+            !env.mock_files
+                .borrow()
+                .contains_key("/etc/genoa/niri-render-drm-device")
+        );
+    }
+
+    #[test]
+    fn test_configure_rhit_dell_pro_max_niri_writes_stable_render_path() {
+        let env = MockEnv::default();
+        seed_pci_device(&env, "0000:c6:00.0", "0x030200", "0x10de", "0x2db8");
+        seed_pci_device(&env, "0000:c7:00.0", "0x038000", "0x1002", "0x1114");
+
+        assert!(configure_rhit_dell_pro_max_niri(&env).expect("configuration should succeed"));
+        assert_eq!(
+            env.mock_files
+                .borrow()
+                .get("/etc/genoa/niri-render-drm-device"),
+            Some(&"/dev/dri/by-path/pci-0000:c7:00.0-render\n".to_string())
+        );
     }
     #[test]
     fn test_find_igpu_intel() {
