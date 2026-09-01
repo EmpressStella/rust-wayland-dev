@@ -59,6 +59,7 @@ for_window [title="^calendar-tui$"] floating enable, resize set 1000 600, move p
 - **Portal Changes: The GNOME backend and Niri/Sway backend require talking to different compositors. To do this:
 
 ```
+sudo pacman -S xdg-desktop-portal-gnome
 mkdir -p ~/.config/xdg-desktop-portal
 echo -e "[preferred]\ndefault=wlr;gtk;" > ~/.config/xdg-desktop-portal/portals.conf
 echo -e "[preferred]\ndefault=gnome;gtk;" > ~/.config/xdg-desktop-portal/gnome-portals.conf
