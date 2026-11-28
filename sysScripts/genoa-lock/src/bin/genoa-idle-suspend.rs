@@ -1,9 +1,10 @@
-//! Prevent a stale idle timeout from immediately suspending after resume.
+//! Prevent stale idle actions from running immediately after resume.
 //!
 //! NVIDIA keeps user sessions runnable around sleep so it can preserve GPU
 //! state. `swayidle` timers therefore continue to age while a laptop sleeps.
 //! This helper records the cumulative suspend time when its idle service
-//! starts, and refuses a timeout that has crossed a real sleep interval.
+//! starts, then suppresses the stale dim, lock, display-off, and suspend batch
+//! that can otherwise run immediately after wake.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -27,20 +28,35 @@ const STATE_FILE_NAME: &str = "idle-suspend-baseline";
 const SYSTEMCTL: &str = "/usr/bin/systemctl";
 const MAX_STATE_BYTES: usize = 64;
 const SUSPEND_DETECTION_TOLERANCE: Duration = Duration::from_secs(1);
+const RESUME_GUARD_DURATION: Duration = Duration::from_secs(60);
+const STALE_ACTION_EXIT_CODE: u8 = 75;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GuardState {
+    cumulative_suspend: Duration,
+    suppress_until: Duration,
+}
 
 fn main() -> ExitCode {
     let result = match std::env::args().skip(1).collect::<Vec<_>>().as_slice() {
-        [] => suspend_if_timer_is_current(),
-        [flag] if flag == "--record-baseline" => record_baseline(),
+        [] => suspend_if_timer_is_current().map(|()| ExitCode::SUCCESS),
+        [flag] if flag == "--check" => stale_idle_action_is_current().map(|current| {
+            if current {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(STALE_ACTION_EXIT_CODE)
+            }
+        }),
+        [flag] if flag == "--record-baseline" => record_baseline().map(|()| ExitCode::SUCCESS),
         [flag] if flag == "--help" || flag == "-h" => {
-            println!("Usage: genoa-idle-suspend [--record-baseline]");
-            Ok(())
+            println!("Usage: genoa-idle-suspend [--record-baseline | --check]");
+            Ok(ExitCode::SUCCESS)
         }
-        _ => Err("Usage: genoa-idle-suspend [--record-baseline]".to_string()),
+        _ => Err("Usage: genoa-idle-suspend [--record-baseline | --check]".to_string()),
     };
 
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(exit_code) => exit_code,
         Err(error) => {
             eprintln!("genoa-idle-suspend: {error}");
             ExitCode::FAILURE
@@ -50,26 +66,19 @@ fn main() -> ExitCode {
 
 fn record_baseline() -> Result<(), String> {
     let mut state = open_state_file()?;
-    write_baseline(&mut state, cumulative_suspend_time()?)
+    write_state(
+        &mut state,
+        GuardState {
+            cumulative_suspend: cumulative_suspend_time()?,
+            suppress_until: Duration::ZERO,
+        },
+    )
 }
 
 fn suspend_if_timer_is_current() -> Result<(), String> {
-    let mut state = open_state_file()?;
-    let now = cumulative_suspend_time()?;
-    let baseline = match read_baseline(&mut state) {
-        Ok(baseline) => baseline,
-        Err(error) => {
-            eprintln!("genoa-idle-suspend: invalid idle baseline; resetting it: {error}");
-            None
-        }
-    };
-
-    if baseline.is_none_or(|baseline| timer_aged_through_suspend(baseline, now)) {
-        write_baseline(&mut state, now)?;
-        eprintln!("genoa-idle-suspend: discarded an idle timer that aged through suspend");
+    if !stale_idle_action_is_current()? {
         return Ok(());
     }
-
     let status = Command::new(SYSTEMCTL)
         .arg("suspend")
         .stdin(Stdio::null())
@@ -84,16 +93,67 @@ fn suspend_if_timer_is_current() -> Result<(), String> {
     }
 }
 
+fn stale_idle_action_is_current() -> Result<bool, String> {
+    let cumulative_suspend = cumulative_suspend_time()?;
+    let monotonic = monotonic_time()?;
+    let mut state_file = open_state_file()?;
+    let state = match read_state(&mut state_file) {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("genoa-idle-suspend: invalid idle baseline; resetting it: {error}");
+            None
+        }
+    };
+    let (next_state, should_run) = decide_idle_action(state, cumulative_suspend, monotonic);
+    write_state(&mut state_file, next_state)?;
+    if !should_run {
+        eprintln!("genoa-idle-suspend: discarded an idle action that aged through suspend");
+    }
+    Ok(should_run)
+}
+
+fn decide_idle_action(
+    state: Option<GuardState>,
+    cumulative_suspend: Duration,
+    monotonic: Duration,
+) -> (GuardState, bool) {
+    let Some(mut state) = state else {
+        return (
+            GuardState {
+                cumulative_suspend,
+                suppress_until: suppress_until(monotonic),
+            },
+            false,
+        );
+    };
+    if timer_aged_through_suspend(state.cumulative_suspend, cumulative_suspend) {
+        state.cumulative_suspend = cumulative_suspend;
+        state.suppress_until = suppress_until(monotonic);
+        return (state, false);
+    }
+    if monotonic < state.suppress_until {
+        return (state, false);
+    }
+    state.cumulative_suspend = cumulative_suspend;
+    (state, true)
+}
+
+const fn suppress_until(monotonic: Duration) -> Duration {
+    monotonic.saturating_add(RESUME_GUARD_DURATION)
+}
+
 fn timer_aged_through_suspend(baseline: Duration, now: Duration) -> bool {
     now.saturating_sub(baseline) >= SUSPEND_DETECTION_TOLERANCE
 }
 
 fn cumulative_suspend_time() -> Result<Duration, String> {
-    let boottime = duration_from_timespec(clock_gettime(ClockId::Boottime))?;
     let monotonic = duration_from_timespec(clock_gettime(ClockId::Monotonic))?;
-    boottime
-        .checked_sub(monotonic)
-        .ok_or_else(|| "monotonic clock exceeded boottime clock".to_string())
+    let boottime = duration_from_timespec(clock_gettime(ClockId::Boottime))?;
+    Ok(boottime.saturating_sub(monotonic))
+}
+
+fn monotonic_time() -> Result<Duration, String> {
+    duration_from_timespec(clock_gettime(ClockId::Monotonic))
 }
 
 fn duration_from_timespec(timespec: Timespec) -> Result<Duration, String> {
@@ -169,10 +229,9 @@ fn ensure_private_regular_file(file: &File, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn read_baseline(file: &mut File) -> Result<Option<Duration>, String> {
+fn read_state(file: &mut File) -> Result<Option<GuardState>, String> {
     file.seek(SeekFrom::Start(0))
         .map_err(|error| format!("could not read idle baseline: {error}"))?;
-
     let mut bytes = [0_u8; MAX_STATE_BYTES + 1];
     let length = file
         .read(&mut bytes)
@@ -183,24 +242,39 @@ fn read_baseline(file: &mut File) -> Result<Option<Duration>, String> {
     if length > MAX_STATE_BYTES {
         return Err("idle baseline is too large".to_string());
     }
-
     let text = std::str::from_utf8(&bytes[..length])
         .map_err(|_| "idle baseline is not valid UTF-8".to_string())?;
-    let nanoseconds = text
-        .trim()
-        .parse::<u64>()
-        .map_err(|_| "idle baseline is not a duration".to_string())?;
-    Ok(Some(Duration::from_nanos(nanoseconds)))
+    let values = text.split_ascii_whitespace().collect::<Vec<_>>();
+    match values.as_slice() {
+        [legacy_baseline] => Ok(Some(GuardState {
+            cumulative_suspend: parse_duration(legacy_baseline)?,
+            suppress_until: Duration::ZERO,
+        })),
+        ["v1", baseline, suppress_until] => Ok(Some(GuardState {
+            cumulative_suspend: parse_duration(baseline)?,
+            suppress_until: parse_duration(suppress_until)?,
+        })),
+        _ => Err("idle baseline has an unknown format".to_string()),
+    }
 }
 
-fn write_baseline(file: &mut File, baseline: Duration) -> Result<(), String> {
-    let nanoseconds = u64::try_from(baseline.as_nanos())
+fn parse_duration(value: &str) -> Result<Duration, String> {
+    let nanoseconds = value
+        .parse::<u64>()
+        .map_err(|_| "idle baseline is not a duration".to_string())?;
+    Ok(Duration::from_nanos(nanoseconds))
+}
+
+fn write_state(file: &mut File, state: GuardState) -> Result<(), String> {
+    let suspend_nanoseconds = u64::try_from(state.cumulative_suspend.as_nanos())
         .map_err(|_| "idle baseline exceeds the supported range".to_string())?;
+    let suppress_nanoseconds = u64::try_from(state.suppress_until.as_nanos())
+        .map_err(|_| "idle suppression window exceeds the supported range".to_string())?;
     file.set_len(0)
         .map_err(|error| format!("could not reset idle baseline: {error}"))?;
     file.seek(SeekFrom::Start(0))
         .map_err(|error| format!("could not write idle baseline: {error}"))?;
-    file.write_all(nanoseconds.to_string().as_bytes())
+    file.write_all(format!("v1 {suspend_nanoseconds} {suppress_nanoseconds}\n").as_bytes())
         .map_err(|error| format!("could not write idle baseline: {error}"))?;
     file.sync_data()
         .map_err(|error| format!("could not save idle baseline: {error}"))
@@ -210,7 +284,10 @@ fn write_baseline(file: &mut File, baseline: Duration) -> Result<(), String> {
 mod tests {
     use std::{os::unix::fs::PermissionsExt, time::Duration};
 
-    use super::{open_state_file_in, read_baseline, timer_aged_through_suspend, write_baseline};
+    use super::{
+        GuardState, RESUME_GUARD_DURATION, decide_idle_action, open_state_file_in, read_state,
+        timer_aged_through_suspend, write_state,
+    };
 
     #[test]
     fn detects_idle_timers_that_crossed_a_real_suspend() {
@@ -229,14 +306,55 @@ mod tests {
     }
 
     #[test]
-    fn baseline_state_is_private_and_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    fn state_is_private_and_round_trips() -> Result<(), Box<dyn std::error::Error>> {
         let temporary = tempfile::tempdir()?;
         std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))?;
         let mut state = open_state_file_in(temporary.path())?;
-
-        write_baseline(&mut state, Duration::from_secs(42))?;
-        assert_eq!(read_baseline(&mut state)?, Some(Duration::from_secs(42)));
+        let expected = GuardState {
+            cumulative_suspend: Duration::from_secs(42),
+            suppress_until: Duration::from_secs(99),
+        };
+        write_state(&mut state, expected)?;
+        assert_eq!(read_state(&mut state)?, Some(expected));
         assert_eq!(state.metadata()?.permissions().mode() & 0o777, 0o600);
         Ok(())
+    }
+
+    #[test]
+    fn suppresses_the_entire_stale_action_batch_after_resume() {
+        let state = GuardState {
+            cumulative_suspend: Duration::from_secs(10),
+            suppress_until: Duration::ZERO,
+        };
+        let (state, run_first_action) = decide_idle_action(
+            Some(state),
+            Duration::from_secs(12),
+            Duration::from_secs(1_000),
+        );
+        assert!(!run_first_action);
+        assert_eq!(
+            state.suppress_until,
+            Duration::from_secs(1_000) + RESUME_GUARD_DURATION
+        );
+        let (_, run_later_stale_action) = decide_idle_action(
+            Some(state),
+            Duration::from_secs(12),
+            Duration::from_secs(1_005),
+        );
+        assert!(!run_later_stale_action);
+    }
+
+    #[test]
+    fn allows_a_new_idle_sequence_after_the_guard_expires() {
+        let state = GuardState {
+            cumulative_suspend: Duration::from_secs(12),
+            suppress_until: Duration::from_secs(1_060),
+        };
+        let (_, should_run) = decide_idle_action(
+            Some(state),
+            Duration::from_secs(12),
+            Duration::from_secs(1_061),
+        );
+        assert!(should_run);
     }
 }

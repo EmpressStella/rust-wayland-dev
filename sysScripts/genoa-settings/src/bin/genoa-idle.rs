@@ -11,6 +11,8 @@ const GENOA_IDLE_SUSPEND: &str = "/usr/local/bin/genoa-idle-suspend";
 const BRIGHTNESSCTL: &str = "/usr/bin/brightnessctl";
 const SYSTEMD_INHIBIT: &str = "/usr/bin/systemd-inhibit";
 const BRIGHTNESS_STATE: &str = "idle-brightness";
+const NIRI_IDLE_UNIT: &str = include_str!("../../../idle-manager/genoa-niri-idle.service");
+const SWAY_IDLE_UNIT: &str = include_str!("../../../idle-manager/genoa-sway-idle.service");
 
 #[derive(Clone, Copy)]
 enum Compositor {
@@ -63,10 +65,20 @@ fn run() -> Result<(), String> {
     let mut arguments = env::args();
     let _program = arguments.next();
     let command = arguments.next().ok_or_else(|| {
-        "usage: genoa-idle <run|dim|restore|lock|suspend|before-sleep|inhibit-suspend>".to_string()
+        "usage: genoa-idle <activate|run|dim|restore|lock|suspend|before-sleep|inhibit-suspend>"
+            .to_string()
     })?;
 
     match command.as_str() {
+        "activate" => {
+            let compositor = arguments
+                .next()
+                .ok_or_else(|| "usage: genoa-idle activate <niri|sway>".to_string())?;
+            if arguments.next().is_some() {
+                return Err("usage: genoa-idle activate <niri|sway>".to_string());
+            }
+            activate_idle_service(Compositor::parse(&compositor)?)
+        }
         "run" => {
             let compositor = arguments
                 .next()
@@ -90,10 +102,37 @@ fn run() -> Result<(), String> {
             inhibit_suspend(&activity, &command)
         }
         _ => Err(
-            "usage: genoa-idle <run|dim|restore|lock|suspend|before-sleep|inhibit-suspend>"
-                .to_string(),
+            "usage: genoa-idle <activate|run|dim|restore|lock|suspend|before-sleep|inhibit-suspend>".to_string(),
         ),
     }
+}
+
+fn activate_idle_service(compositor: Compositor) -> Result<(), String> {
+    let (service, contents) = match compositor {
+        Compositor::Niri => ("genoa-niri-idle.service", NIRI_IDLE_UNIT),
+        Compositor::Sway => ("genoa-sway-idle.service", SWAY_IDLE_UNIT),
+    };
+    let config_home = env::var_os("XDG_CONFIG_HOME")
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config")))
+        .ok_or_else(|| "HOME and XDG_CONFIG_HOME are unavailable".to_string())?;
+    let directory = config_home.join("systemd/user");
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
+    let destination = directory.join(service);
+    if fs::read_to_string(&destination).ok().as_deref() != Some(contents) {
+        fs::write(&destination, contents)
+            .map_err(|error| format!("could not write {}: {error}", destination.display()))?;
+    }
+    run_status(
+        Command::new("/usr/bin/systemctl").args(["--user", "daemon-reload"]),
+        "could not reload user services",
+    )?;
+    run_status(
+        Command::new("/usr/bin/systemctl").args(["--user", "restart", service]),
+        "could not restart idle management",
+    )
 }
 
 fn inhibit_suspend(activity: &str, command: &[String]) -> Result<(), String> {
@@ -173,24 +212,25 @@ fn swayidle_arguments(
 ) -> Vec<String> {
     let executable = shell_quote(executable);
     let command = |name: &str| format!("{executable} {name}");
+    let guarded = |command: String| format!("{GENOA_IDLE_SUSPEND} --check && {command}");
     vec![
         "-w".to_string(),
         "timeout".to_string(),
         settings.dim_after_seconds.to_string(),
-        command("dim"),
+        guarded(command("dim")),
         "resume".to_string(),
         command("restore"),
         "timeout".to_string(),
         settings.lock_after_seconds.to_string(),
-        command("lock"),
+        guarded(command("lock")),
         "timeout".to_string(),
         settings.display_off_after_seconds.to_string(),
-        compositor.display_off_command().to_string(),
+        guarded(compositor.display_off_command().to_string()),
         "resume".to_string(),
         compositor.display_on_command().to_string(),
         "timeout".to_string(),
         settings.suspend_after_seconds.to_string(),
-        command("suspend"),
+        guarded(command("suspend")),
         "before-sleep".to_string(),
         command("before-sleep"),
     ]
@@ -297,6 +337,13 @@ mod tests {
             arguments
                 .iter()
                 .any(|argument| argument.contains("dpms off"))
+        );
+        assert!(
+            arguments
+                .iter()
+                .filter(|argument| argument.contains("--check"))
+                .count()
+                >= 4
         );
     }
 

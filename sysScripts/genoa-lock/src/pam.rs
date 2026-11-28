@@ -24,7 +24,6 @@ pub fn authenticate_current_user(password: Zeroizing<String>) -> Result<bool, St
         Err(error) if is_denial(error.code()) => return Ok(false),
         Err(_) => return Err("the PAM account service is unavailable".to_string()),
     }
-    let _ = client.reinitialize_credentials(Flag::NONE);
     Ok(true)
 }
 

@@ -70,7 +70,7 @@ const IDLE_SERVICE_CONFIG_MIGRATIONS: &[(&str, &[(&str, &str)])] = &[
         ".config/niri/config.kdl",
         &[(
             r#"spawn-sh-at-startup "swayidle -w timeout 200 'brightnessctl set 0%' resume 'brightnessctl set 60%' timeout 600 '/usr/local/bin/genoa-lock' timeout 630 'NIRI_SOCKET=\"$NIRI_SOCKET\" niri msg action power-off-monitors' resume 'NIRI_SOCKET=\"$NIRI_SOCKET\" niri msg action power-on-monitors' timeout 1200 'systemctl suspend' before-sleep '/usr/local/bin/genoa-lock'""#,
-            r#"spawn-sh-at-startup "/usr/bin/dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP NIRI_SOCKET; /usr/bin/systemctl --user import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP NIRI_SOCKET; /usr/bin/systemctl --user restart genoa-niri-idle.service""#,
+            r#"spawn-sh-at-startup "/usr/bin/dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP NIRI_SOCKET; /usr/bin/systemctl --user import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP NIRI_SOCKET; $HOME/.cargo/bin/genoa-idle activate niri""#,
         )],
     ),
     (
@@ -86,7 +86,11 @@ const IDLE_SERVICE_CONFIG_MIGRATIONS: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "exec_always ~/.config/sway/swayidle.sh",
+                "exec_always ~/.cargo/bin/genoa-idle activate sway",
+            ),
+            (
                 "exec_always systemctl --user restart genoa-sway-idle.service",
+                "exec_always ~/.cargo/bin/genoa-idle activate sway",
             ),
         ],
     ),

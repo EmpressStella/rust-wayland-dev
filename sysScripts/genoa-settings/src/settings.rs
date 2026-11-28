@@ -1,4 +1,15 @@
-use std::{cell::RefCell, env, path::Path, process::Command, rc::Rc, thread};
+use std::{
+    cell::RefCell,
+    env, fs,
+    io::Write,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::Command,
+    rc::Rc,
+    sync::mpsc,
+    thread,
+    time::Duration,
+};
 
 use genoa_settings::idle::{IdleProfile, IdleSettings};
 use genoa_settings::wallpaper::{
@@ -13,6 +24,8 @@ use gtk4::{
 };
 
 const MAX_VISIBLE_WALLPAPERS: usize = 72;
+const NIRI_IDLE_UNIT: &str = include_str!("../../idle-manager/genoa-niri-idle.service");
+const SWAY_IDLE_UNIT: &str = include_str!("../../idle-manager/genoa-sway-idle.service");
 const TIMEOUT_MINUTES: &[u32] = &[
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 20, 25, 30, 45, 60, 90, 120, 180, 240,
 ];
@@ -459,33 +472,87 @@ fn lock_and_sleep_page(settings: &IdleSettings, load_warning: Option<&str>) -> G
     page.append(&save);
     page.append(&status);
 
-    let dim_value = dim.selector;
-    let lock_value = lock.selector;
-    let display_off_value = display_off.selector;
-    let suspend_value = suspend.selector;
-    let build_inhibit_value = build_inhibit.switch;
-    let update_inhibit_value = update_inhibit.switch;
-    save.connect_clicked(move |_| {
-        let settings = IdleSettings {
-            dim_after_seconds: timeout_value(&dim_value),
-            lock_after_seconds: timeout_value(&lock_value),
-            display_off_after_seconds: timeout_value(&display_off_value),
-            suspend_after_seconds: timeout_value(&suspend_value),
-            inhibit_suspend_while_building: build_inhibit_value.is_active(),
-            inhibit_suspend_while_updating: update_inhibit_value.is_active(),
-        };
-        match settings.save() {
-            Ok(()) => match restart_active_idle_service() {
-                Ok(service) => status.set_label(&format!("Saved. Restarting {service}.")),
-                Err(error) => status.set_label(&format!(
-                    "Saved, but could not restart idle management: {error}"
-                )),
-            },
-            Err(error) => status.set_label(&error),
-        }
-    });
+    configure_idle_save(
+        &save,
+        &status,
+        IdleControls {
+            dim: dim.selector,
+            lock: lock.selector,
+            display_off: display_off.selector,
+            suspend: suspend.selector,
+            build_inhibit: build_inhibit.switch,
+            update_inhibit: update_inhibit.switch,
+        },
+    );
 
     page
+}
+
+fn configure_idle_save(save: &Button, status: &Label, controls: IdleControls) {
+    let save_for_worker = save.clone();
+    let status = status.clone();
+    save.connect_clicked(move |_| {
+        let settings = IdleSettings {
+            dim_after_seconds: timeout_value(&controls.dim),
+            lock_after_seconds: timeout_value(&controls.lock),
+            display_off_after_seconds: timeout_value(&controls.display_off),
+            suspend_after_seconds: timeout_value(&controls.suspend),
+            inhibit_suspend_while_building: controls.build_inhibit.is_active(),
+            inhibit_suspend_while_updating: controls.update_inhibit.is_active(),
+        };
+        if let Err(error) = settings.save() {
+            status.set_label(&error);
+            return;
+        }
+        save_for_worker.set_sensitive(false);
+        status.set_label("");
+        let (sender, receiver) = mpsc::sync_channel(1);
+        if let Err(error) = thread::Builder::new()
+            .name("genoa-idle-restart".to_string())
+            .spawn(move || {
+                let _ = sender.send(restart_active_idle_service());
+            })
+        {
+            status.set_label(&format!(
+                "Saved, but could not start idle management: {error}"
+            ));
+            save_for_worker.set_sensitive(true);
+            return;
+        }
+        let status_for_result = status.clone();
+        let save_for_result = save_for_worker.clone();
+        glib::timeout_add_local(Duration::from_millis(50), move || {
+            match receiver.try_recv() {
+                Ok(Ok(())) => {
+                    status_for_result.set_label("Saved.");
+                    save_for_result.set_sensitive(true);
+                    glib::ControlFlow::Break
+                }
+                Ok(Err(error)) => {
+                    status_for_result.set_label(&format!(
+                        "Saved, but could not apply the idle policy: {error}"
+                    ));
+                    save_for_result.set_sensitive(true);
+                    glib::ControlFlow::Break
+                }
+                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    status_for_result.set_label("Saved, but idle management stopped unexpectedly.");
+                    save_for_result.set_sensitive(true);
+                    glib::ControlFlow::Break
+                }
+            }
+        });
+    });
+}
+
+struct IdleControls {
+    dim: DropDown,
+    lock: DropDown,
+    display_off: DropDown,
+    suspend: DropDown,
+    build_inhibit: Switch,
+    update_inhibit: Switch,
 }
 
 struct TimeoutControl {
@@ -554,33 +621,66 @@ fn suspend_inhibit_control(label: &str, active: bool) -> SuspendInhibitControl {
     SuspendInhibitControl { row, switch }
 }
 
-fn restart_active_idle_service() -> Result<&'static str, String> {
-    let service = if env::var_os("NIRI_SOCKET").is_some() {
-        "genoa-niri-idle.service"
+fn restart_active_idle_service() -> Result<(), String> {
+    let (service, contents) = if env::var_os("NIRI_SOCKET").is_some() {
+        ("genoa-niri-idle.service", NIRI_IDLE_UNIT)
     } else if env::var_os("SWAYSOCK").is_some() {
-        "genoa-sway-idle.service"
+        ("genoa-sway-idle.service", SWAY_IDLE_UNIT)
     } else {
         return Err("open Genoa Settings from a Niri or Sway session".to_string());
     };
-    let service_for_worker = service.to_string();
-    thread::Builder::new()
-        .name("genoa-idle-restart".to_string())
-        .spawn(move || {
-            match Command::new("/usr/bin/systemctl")
-                .args(["--user", "restart", &service_for_worker])
-                .status()
-            {
-                Ok(status) if status.success() => {}
-                Ok(status) => {
-                    eprintln!("genoa-settings: {service_for_worker} exited with {status}");
-                }
-                Err(error) => {
-                    eprintln!("genoa-settings: could not restart {service_for_worker}: {error}");
-                }
-            }
-        })
-        .map_err(|error| format!("could not start the idle-service restart: {error}"))?;
-    Ok(service)
+    ensure_idle_service(service, contents)?;
+    run_systemctl(&["--user", "daemon-reload"])?;
+    run_systemctl(&["--user", "restart", service])
+}
+
+fn ensure_idle_service(service: &str, contents: &str) -> Result<(), String> {
+    let directory = config_home()?.join("systemd/user");
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
+    let destination = directory.join(service);
+    if fs::read_to_string(&destination).ok().as_deref() == Some(contents) {
+        return Ok(());
+    }
+    let mut temporary = tempfile::NamedTempFile::new_in(&directory)
+        .map_err(|error| format!("could not create a temporary service file: {error}"))?;
+    temporary
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("could not secure the temporary service file: {error}"))?;
+    temporary
+        .write_all(contents.as_bytes())
+        .map_err(|error| format!("could not write the idle service: {error}"))?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|error| format!("could not save the idle service: {error}"))?;
+    temporary
+        .persist(destination)
+        .map_err(|error| format!("could not install the idle service: {}", error.error))?;
+    Ok(())
+}
+
+fn config_home() -> Result<PathBuf, String> {
+    match env::var_os("XDG_CONFIG_HOME") {
+        Some(path) if !path.is_empty() => Ok(PathBuf::from(path)),
+        _ => env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join(".config"))
+            .ok_or_else(|| "HOME and XDG_CONFIG_HOME are unavailable".to_string()),
+    }
+}
+
+fn run_systemctl(arguments: &[&str]) -> Result<(), String> {
+    let status = Command::new("/usr/bin/systemctl")
+        .args(arguments)
+        .status()
+        .map_err(|error| format!("could not start systemctl: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("systemctl exited with {status}"))
+    }
 }
 
 fn page_container() -> GtkBox {
